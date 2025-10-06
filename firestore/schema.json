@@ -1,1 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MediaMetadata",
+  "type": "object",
+  "required": [
+    "title",
+    "caption",
+    "summary",
+    "tags",
+    "licensing_flags",
+    "embedding"
+  ],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Human-readable title for the asset"
+    },
+    "caption": {
+      "type": "string",
+      "description": "Editorial caption for display or licensing"
+    },
+    "summary": {
+      "type": "string",
+      "description": "Short summary or abstract of the asset"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Getty-aligned keyword tags"
+    },
+    "licensing_flags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Editorial or commercial licensing flags"
+    },
+    "embedding": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "Vector embedding for semantic search"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp of metadata creation"
+    },
+    "source": {
+      "type": "string",
+      "description": "Originating pipeline or service"
+    }
+  },
+  "additionalProperties": false
+}
 
