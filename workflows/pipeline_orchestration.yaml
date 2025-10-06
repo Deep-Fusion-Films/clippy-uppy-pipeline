@@ -1,1 +1,70 @@
+version: "3.9"
+
+services:
+  transcode:
+    image: transcode-service:latest
+    build:
+      context: ./transcode
+      dockerfile: Dockerfile
+    volumes:
+      - ./videos:/videos
+      - ./transcoded:/transcoded
+    ports:
+      - "8001:8000"
+    environment:
+      - LOG_LEVEL=INFO
+
+  sample_frames:
+    image: sample-frames-service:latest
+    build:
+      context: ./sample_frames
+      dockerfile: Dockerfile
+    volumes:
+      - ./transcoded:/videos
+      - ./frames:/frames
+    ports:
+      - "8002:8000"
+    environment:
+      - LOG_LEVEL=INFO
+
+  transcribe:
+    image: transcribe-service:latest
+    build:
+      context: ./transcribe
+      dockerfile: Dockerfile
+    volumes:
+      - ./transcoded:/videos
+      - ./audio:/audio
+    ports:
+      - "8003:8000"
+    environment:
+      - LOG_LEVEL=INFO
+      - WHISPER_MODEL=base
+
+  getty_enricher:
+    image: getty-enricher-service:latest
+    build:
+      context: ./getty_enricher
+      dockerfile: Dockerfile
+    volumes:
+      - ./config:/config
+    ports:
+      - "8004:8000"
+    environment:
+      - TAXONOMY_PATH=/config/taxonomy.json
+
+  store_metadata:
+    image: store-metadata-service:latest
+    build:
+      context: ./store_metadata
+      dockerfile: Dockerfile
+    volumes:
+      - ./config:/config
+      - ./secrets:/secrets
+    ports:
+      - "8005:8000"
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/secrets/firestore_service_account.json
+      - SCHEMA_PATH=/config/schema.json
+      - LOG_LEVEL=INFO
 
