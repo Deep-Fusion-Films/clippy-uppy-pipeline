@@ -41,6 +41,22 @@ services:
       - LOG_LEVEL=INFO
       - WHISPER_MODEL=base
 
+    qwen_enricher:
+    image: qwen-enricher-service:latest
+    build:
+      context: ./qwen_enricher
+      dockerfile: Dockerfile
+    ports:
+      - "8006:8000"
+    volumes:
+      - ./transcoded:/videos
+      - ./frames:/frames
+      - ./config:/config
+    environment:
+      - MODEL_NAME=Qwen1.5-7B-Chat
+      - TASKS=caption,summary,tags,readme
+      - LOG_LEVEL=INFO
+
   getty_enricher:
     image: getty-enricher-service:latest
     build:
