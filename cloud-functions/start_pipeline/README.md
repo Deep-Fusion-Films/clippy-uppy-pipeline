@@ -14,14 +14,3 @@ This module is the start point to the Clippy-Uppy pipeline. It is triggered when
   "file_name": "example_video.mov",
   "bucket": "getty-ingest-media"
 }
-
-## Local Testing
-
-Simulating a GCS (Google Cloud Storage) event can be conducted locally by:
-
-event = {
-  "name": "sunset_walk.mov",
-  "bucket": "getty-ingest-media"
-}
-context = None
-start_pipeline(event, context)
