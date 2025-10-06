@@ -1,9 +1,11 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
 import os
 import logging
 import transformers
+
+from prompt_templates import build_editorial_prompt
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -29,27 +31,21 @@ class CaptionResponse(BaseModel):
     tags: List[str]
     licensing_flags: List[str]
 
-# Prompt template
-def build_prompt(scene: str, transcript: str) -> str:
-    return (
-        f"Generate a Getty-style editorial caption for a video scene.\n"
-        f"Scene: {scene}\n"
-        f"Transcript: {transcript}\n"
-        f"Return: title, caption, summary, tags, licensing_flags\n"
-        f"Tone: editorial, descriptive, non-commercial"
-    )
-
 # Caption endpoint
 @app.post("/caption", response_model=CaptionResponse)
 async def generate_caption(request: CaptionRequest):
-    prompt = build_prompt(request.scene_description, request.transcript)
+    prompt = build_editorial_prompt(
+        scene_description=request.scene_description,
+        transcript=request.transcript
+    )
 
     inputs = tokenizer(prompt, return_tensors="pt")
     outputs = model.generate(**inputs, max_new_tokens=512)
     decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    # Parse output (placeholder logic – replace with structured parsing)
-    # You may use regex, JSON parsing, or structured delimiters
+    # TODO: Replace with structured parsing logic
+    logging.info("Raw model output:\n%s", decoded)
+
     return CaptionResponse(
         title="Generated Title",
         caption="Generated Caption",
