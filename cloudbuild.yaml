@@ -1,0 +1,161 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: 'europe-west1'
+
+steps:
+# --- Build & Deploy start_pipeline ---
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest', './cloud-run/start_pipeline']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: [
+    'run','deploy','start-pipeline',
+    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest',
+    '--region','${_REGION}',
+    '--platform','managed',
+    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--execution-environment','gen2',
+    '--no-allow-unauthenticated',
+    '--concurrency','20',
+    '--cpu','1',
+    '--memory','1Gi'
+  ]
+
+# --- Build & Deploy transcode ---
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest', './cloud-run/transcode']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: [
+    'run','deploy','transcode-service',
+    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest',
+    '--region','${_REGION}',
+    '--platform','managed',
+    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--execution-environment','gen2',
+    '--no-allow-unauthenticated',
+    '--max-instances','10',
+    '--concurrency','2',
+    '--cpu','2',
+    '--memory','2Gi'
+  ]
+
+# --- Build & Deploy transcribe ---
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest', './cloud-run/transcribe']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: [
+    'run','deploy','transcribe-service',
+    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest',
+    '--region','${_REGION}',
+    '--platform','managed',
+    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--execution-environment','gen2',
+    '--no-allow-unauthenticated',
+    '--max-instances','20',
+    '--concurrency','5',
+    '--cpu','2',
+    '--memory','2Gi'
+  ]
+
+# --- Build & Deploy sample_frames ---
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest', './cloud-run/sample_frames']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: [
+    'run','deploy','sample-frames-service',
+    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest',
+    '--region','${_REGION}',
+    '--platform','managed',
+    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--execution-environment','gen2',
+    '--no-allow-unauthenticated',
+    '--max-instances','20',
+    '--concurrency','5',
+    '--cpu','2',
+    '--memory','2Gi'
+  ]
+
+# --- Build & Deploy getty_enricher ---
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest', './cloud-run/getty_enricher']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: [
+    'run','deploy','getty-enricher-service',
+    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest',
+    '--region','${_REGION}',
+    '--platform','managed',
+    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--execution-environment','gen2',
+    '--no-allow-unauthenticated',
+    '--max-instances','50',
+    '--concurrency','30',
+    '--cpu','1',
+    '--memory','1Gi'
+  ]
+
+# --- Build & Deploy qwen_enricher ---
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest', './cloud-run/qwen_enricher']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: [
+    'run','deploy','qwen-enricher-service',
+    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest',
+    '--region','${_REGION}',
+    '--platform','managed',
+    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--execution-environment','gen2',
+    '--no-allow-unauthenticated',
+    '--max-instances','50',
+    '--concurrency','30',
+    '--cpu','1',
+    '--memory','1Gi'
+  ]
+
+# --- Build & Deploy store_metadata ---
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest', './cloud-run/store_metadata']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: [
+    'run','deploy','store-metadata-service',
+    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest',
+    '--region','${_REGION}',
+    '--platform','managed',
+    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--execution-environment','gen2',
+    '--no-allow-unauthenticated',
+    '--max-instances','50',
+    '--concurrency','50',
+    '--cpu','1',
+    '--memory','1Gi'
+  ]
+
+images:
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest'
