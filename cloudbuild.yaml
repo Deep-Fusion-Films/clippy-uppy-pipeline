@@ -137,4 +137,4 @@ steps:
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args
+  args:
