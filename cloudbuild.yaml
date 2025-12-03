@@ -137,4 +137,25 @@ steps:
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args:
+  args: [
+    'run','deploy','store-metadata-service',
+    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest',
+    '--region','${_REGION}',
+    '--platform','managed',
+    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--execution-environment','gen2',
+    '--no-allow-unauthenticated',
+    '--max-instances','50',
+    '--concurrency','50',
+    '--cpu','1',
+    '--memory','1Gi'
+  ]
+
+images:
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest'
