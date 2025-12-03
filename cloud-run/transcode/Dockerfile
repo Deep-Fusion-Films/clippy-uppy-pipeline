@@ -18,9 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Expose FastAPI port
-EXPOSE 8000
+# Expose Cloud Run port (must be 8080)
+EXPOSE 8080
 
 # Start the transcoding service
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-
+# Use Cloud Run's injected PORT environment variable for flexibility
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
