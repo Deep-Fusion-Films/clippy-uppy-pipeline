@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import cv2
 import os
 import logging
@@ -15,10 +15,17 @@ app = FastAPI()
 class FrameRequest(BaseModel):
     file_name: str
     bucket: str
+    interval_sec: Optional[int] = 5  # Optional override for frame sampling interval
 
 # Response schema
 class FrameResponse(BaseModel):
+    status: str
     frame_paths: List[str]
+
+# Health check endpoint (required for Cloud Run)
+@app.get("/")
+def health():
+    return {"status": "healthy"}
 
 # Frame extraction logic
 def extract_key_frames(video_path: str, output_dir: str, interval_sec: int = 5) -> List[str]:
@@ -27,6 +34,9 @@ def extract_key_frames(video_path: str, output_dir: str, interval_sec: int = 5) 
         raise RuntimeError(f"Failed to open video: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        raise RuntimeError("Invalid FPS detected")
+
     frame_interval = int(fps * interval_sec)
     frame_count = 0
     saved_frames = []
@@ -55,10 +65,9 @@ async def sample_frames(request: FrameRequest):
     output_dir = f"/frames/{request.file_name.replace('.', '_')}"
 
     try:
-        frames = extract_key_frames(video_path, output_dir)
+        frames = extract_key_frames(video_path, output_dir, request.interval_sec or 5)
         logging.info("Extracted %d frames from %s", len(frames), request.file_name)
-        return FrameResponse(frame_paths=frames)
+        return FrameResponse(status="success", frame_paths=frames)
     except Exception as e:
         logging.error("Frame extraction failed: %s", e)
-        return FrameResponse(frame_paths=[])
-
+        return FrameResponse(status="error", frame_paths=[])
