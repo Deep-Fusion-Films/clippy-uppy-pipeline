@@ -4,7 +4,6 @@ from typing import Optional
 import subprocess
 import os
 import logging
-
 import whisper
 
 # Configure logging
@@ -13,8 +12,8 @@ logging.basicConfig(level=logging.INFO)
 # Initialize FastAPI app
 app = FastAPI()
 
-# Load Whisper model (base for speed, change to "medium" or "large" if needed)
-model = whisper.load_model("base")
+# Global model reference (lazy load)
+model = None
 
 # Request schema
 class TranscribeRequest(BaseModel):
@@ -26,6 +25,11 @@ class TranscribeRequest(BaseModel):
 class TranscribeResponse(BaseModel):
     status: str
     transcript: Optional[str]
+
+# Health check endpoint (required for Cloud Run)
+@app.get("/")
+def health():
+    return {"status": "healthy"}
 
 # Audio extraction logic
 def extract_audio(input_path: str, output_path: str) -> bool:
@@ -46,9 +50,16 @@ def extract_audio(input_path: str, output_path: str) -> bool:
         logging.error("Audio extraction failed: %s", e)
         return False
 
-# API endpoint
+# Transcription endpoint
 @app.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe(request: TranscribeRequest):
+    global model
+
+    # Lazy load Whisper model on first request
+    if model is None:
+        logging.info("Loading Whisper model...")
+        model = whisper.load_model("base")  # change to "medium" or "large" if needed
+
     input_path = f"/videos/{request.file_name}"
     audio_path = f"/audio/{request.file_name.replace('.', '_')}.wav"
 
@@ -65,4 +76,3 @@ async def transcribe(request: TranscribeRequest):
     except Exception as e:
         logging.error("Transcription failed: %s", e)
         return TranscribeResponse(status="error", transcript=None)
-
