@@ -5,29 +5,29 @@ import subprocess
 import os
 import logging
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 
-# Initialize FastAPI app
 app = FastAPI()
 
-# Request schema
+# Health check endpoint for Cloud Run
+@app.get("/")
+def health():
+    return {"status": "healthy"}
+
 class TranscodeRequest(BaseModel):
     file_name: str
     bucket: str
     target_format: Optional[str] = "mp4"
 
-# Response schema
 class TranscodeResponse(BaseModel):
     status: str
     output_path: Optional[str]
 
-# Transcoding logic
 def transcode_video(input_path: str, output_path: str) -> bool:
     try:
         cmd = [
             "ffmpeg",
-            "-y",  # overwrite output
+            "-y",
             "-i", input_path,
             "-c:v", "libx264",
             "-preset", "fast",
@@ -42,10 +42,10 @@ def transcode_video(input_path: str, output_path: str) -> bool:
         logging.error("FFmpeg failed: %s", e)
         return False
 
-# API endpoint
 @app.post("/transcode", response_model=TranscodeResponse)
 async def transcode(request: TranscodeRequest):
-    input_path = f"/videos/{request.file_name}"  # Assumes mounted or downloaded
+    # In Cloud Run, you’ll likely need to pull the file from GCS here.
+    input_path = f"/videos/{request.file_name}"
     base_name = os.path.splitext(request.file_name)[0]
     output_path = f"/transcoded/{base_name}.{request.target_format}"
 
@@ -57,4 +57,3 @@ async def transcode(request: TranscodeRequest):
         return TranscodeResponse(status="success", output_path=output_path)
     else:
         return TranscodeResponse(status="error", output_path=None)
-
