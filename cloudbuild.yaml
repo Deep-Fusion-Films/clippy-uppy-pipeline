@@ -130,7 +130,7 @@ steps:
     '--memory','1Gi'
   ]
 
-# --- Build & Deploy store_metadata ---
+# --- Build & Deploy store_metadata  ---
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest', './cloud-run/store_metadata']
 - name: 'gcr.io/cloud-builders/docker'
