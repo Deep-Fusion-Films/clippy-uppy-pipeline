@@ -1,9 +1,9 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List
-import logging
-import json
+from typing import Optional, List
 import os
+import logging
+import requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -11,30 +11,50 @@ logging.basicConfig(level=logging.INFO)
 # Initialize FastAPI app
 app = FastAPI()
 
-# Load Getty taxonomy (assumes local JSON file)
-TAXONOMY_PATH = os.getenv("TAXONOMY_PATH", "taxonomy.json")
-try:
-    with open(TAXONOMY_PATH, "r") as f:
-        getty_tags = set(json.load(f))
-    logging.info("Getty taxonomy loaded with %d tags", len(getty_tags))
-except Exception as e:
-    logging.error("Failed to load Getty taxonomy: %s", e)
-    getty_tags = set()
-
 # Request schema
-class EnrichRequest(BaseModel):
-    tags: List[str]
+class GettyRequest(BaseModel):
+    asset_id: str                # Getty video/image ID
+    fields: Optional[List[str]]  # Which metadata fields to fetch (e.g. title, caption, keywords)
 
 # Response schema
-class EnrichResponse(BaseModel):
-    filtered_tags: List[str]
+class GettyResponse(BaseModel):
+    status: str
+    metadata: Optional[dict]
 
-# Enrichment endpoint
-@app.post("/enrich", response_model=EnrichResponse)
-async def enrich_tags(request: EnrichRequest):
-    input_tags = [tag.strip().lower() for tag in request.tags]
-    matched_tags = [tag for tag in input_tags if tag in getty_tags]
+# Health check endpoint (required for Cloud Run)
+@app.get("/")
+def health():
+    return {"status": "healthy"}
 
-    logging.info("Received %d tags, matched %d Getty tags", len(input_tags), len(matched_tags))
-    return EnrichResponse(filtered_tags=matched_tags)
+# API endpoint
+@app.post("/validate", response_model=GettyResponse)
+async def validate_metadata(request: GettyRequest):
+    client_id = os.getenv("GETTY_CLIENT_ID")
+    client_secret = os.getenv("GETTY_CLIENT_SECRET")
 
+    if not client_id or not client_secret:
+        logging.error("Getty API credentials not set")
+        return GettyResponse(status="error", metadata=None)
+
+    try:
+        # Example Getty API call (Search/Metadata endpoint)
+        url = f"https://api.gettyimages.com/v3/assets/{request.asset_id}"
+        headers = {
+            "Api-Key": client_id,
+            "Authorization": f"Bearer {client_secret}"
+        }
+
+        resp = requests.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Filter metadata fields if requested
+        if request.fields:
+            filtered = {field: data.get(field) for field in request.fields}
+            return GettyResponse(status="success", metadata=filtered)
+
+        return GettyResponse(status="success", metadata=data)
+
+    except Exception as e:
+        logging.error("Getty API call failed: %s", e)
+        return GettyResponse(status="error", metadata=None)
