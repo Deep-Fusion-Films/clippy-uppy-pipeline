@@ -17,7 +17,7 @@ steps:
     '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest',
     '--region','${_REGION}',
     '--platform','managed',
-    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--service-account','cloud-run-deployer@$PROJECT_ID.iam.gserviceaccount.com',
     '--execution-environment','gen2',
     '--no-allow-unauthenticated',
     '--concurrency','20',
@@ -37,7 +37,7 @@ steps:
     '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest',
     '--region','${_REGION}',
     '--platform','managed',
-    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--service-account','cloud-run-deployer@$PROJECT_ID.iam.gserviceaccount.com',
     '--execution-environment','gen2',
     '--no-allow-unauthenticated',
     '--max-instances','10',
@@ -58,7 +58,7 @@ steps:
     '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest',
     '--region','${_REGION}',
     '--platform','managed',
-    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--service-account','cloud-run-deployer@$PROJECT_ID.iam.gserviceaccount.com',
     '--execution-environment','gen2',
     '--no-allow-unauthenticated',
     '--max-instances','20',
@@ -79,7 +79,7 @@ steps:
     '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest',
     '--region','${_REGION}',
     '--platform','managed',
-    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--service-account','cloud-run-deployer@$PROJECT_ID.iam.gserviceaccount.com',
     '--execution-environment','gen2',
     '--no-allow-unauthenticated',
     '--max-instances','20',
@@ -100,7 +100,7 @@ steps:
     '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest',
     '--region','${_REGION}',
     '--platform','managed',
-    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--service-account','cloud-run-deployer@$PROJECT_ID.iam.gserviceaccount.com',
     '--execution-environment','gen2',
     '--no-allow-unauthenticated',
     '--max-instances','50',
@@ -121,7 +121,7 @@ steps:
     '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest',
     '--region','${_REGION}',
     '--platform','managed',
-    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--service-account','cloud-run-deployer@$PROJECT_ID.iam.gserviceaccount.com',
     '--execution-environment','gen2',
     '--no-allow-unauthenticated',
     '--max-instances','50',
@@ -142,7 +142,7 @@ steps:
     '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest',
     '--region','${_REGION}',
     '--platform','managed',
-    '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
+    '--service-account','cloud-run-deployer@$PROJECT_ID.iam.gserviceaccount.com',
     '--execution-environment','gen2',
     '--no-allow-unauthenticated',
     '--max-instances','50',
@@ -157,4 +157,5 @@ images:
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest'
-- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enr
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest'
