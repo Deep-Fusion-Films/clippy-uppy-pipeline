@@ -1,4 +1,4 @@
-## Start Pipeline – Cloud Function
+## Start Pipeline – Cloud Run
 
 This module is the start point to the Clippy-Uppy pipeline. It is triggered when a video file is uploaded to the `getty-ingest-media` bucket situated on GCS (Google Cloud Storage). Once activated, it extracts the file name and bucket name, then sends a POST request to the `/transcode` Cloud Run service to begin processing.
 
