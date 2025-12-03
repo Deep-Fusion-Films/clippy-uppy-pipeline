@@ -157,5 +157,4 @@ images:
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest'
-- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest'
-- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enr
