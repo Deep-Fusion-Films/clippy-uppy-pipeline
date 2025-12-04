@@ -1,5 +1,4 @@
-fastapi==0.110.0
-uvicorn[standard]==0.29.0
-opencv-python-headless==4.9.0.80
-pydantic==2.7.1
-numpy==1.26.4
+fastapi
+uvicorn[standard]
+google-cloud-storage
+opencv-python-headless
