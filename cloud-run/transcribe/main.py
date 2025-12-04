@@ -1,78 +1,94 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import Optional
-import subprocess
 import os
-import logging
-import whisper
+import subprocess
+import json
+from fastapi import FastAPI, Request
+from google.cloud import storage
+from datetime import datetime
+import whisper  # OpenAI Whisper model
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-
-# Initialize FastAPI app
 app = FastAPI()
 
-# Global model reference (lazy load)
-model = None
+# Environment variables
+TRANSCODED_BUCKET = os.getenv("TRANSCODED_BUCKET")   # gs://df-films-assets-euw1/transcoded
+AUDIO_BUCKET = os.getenv("AUDIO_BUCKET")             # gs://df-films-assets-euw1/audio
+TRANSCRIPTS_BUCKET = os.getenv("TRANSCRIPTS_BUCKET") # gs://df-films-metadata-euw1/transcripts
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 
-# Request schema
-class TranscribeRequest(BaseModel):
-    file_name: str
-    bucket: str
-    language: Optional[str] = None  # Optional override
+storage_client = storage.Client()
+model = whisper.load_model(WHISPER_MODEL)
 
-# Response schema
-class TranscribeResponse(BaseModel):
-    status: str
-    transcript: Optional[str]
+def download_from_gcs(bucket_uri: str, blob_name: str, local_path: str):
+    bucket_name = bucket_uri.replace("gs://", "")
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    blob.download_to_filename(local_path)
+    return local_path
 
-# Health check endpoint (required for Cloud Run)
-@app.get("/")
+def upload_to_gcs(bucket_uri: str, blob_name: str, local_path: str):
+    bucket_name = bucket_uri.replace("gs://", "")
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_filename(local_path)
+    return f"gs://{bucket_name}/{blob_name}"
+
+@app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {
+        "status": "ok",
+        "TRANSCODED_BUCKET": TRANSCODED_BUCKET,
+        "AUDIO_BUCKET": AUDIO_BUCKET,
+        "TRANSCRIPTS_BUCKET": TRANSCRIPTS_BUCKET,
+        "WHISPER_MODEL": WHISPER_MODEL
+    }
 
-# Audio extraction logic
-def extract_audio(input_path: str, output_path: str) -> bool:
-    try:
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", input_path,
-            "-vn",
-            "-acodec", "pcm_s16le",
-            "-ar", "16000",
-            "-ac", "1",
-            output_path
-        ]
-        subprocess.run(cmd, check=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        logging.error("Audio extraction failed: %s", e)
-        return False
+@app.post("/transcribe")
+async def transcribe(req: Request):
+    data = await req.json()
+    asset_id = data.get("asset_id")
+    transcoded_path = data["paths"]["transcoded"]  # gs://df-films-assets-euw1/transcoded/getty-123456_normalized.mp4
 
-# Transcription endpoint
-@app.post("/transcribe", response_model=TranscribeResponse)
-async def transcribe(request: TranscribeRequest):
-    global model
+    # Local paths
+    local_video = f"/tmp/{asset_id}_normalized.mp4"
+    local_audio = f"/tmp/{asset_id}.wav"
+    local_transcript = f"/tmp/{asset_id}.json"
 
-    # Lazy load Whisper model on first request
-    if model is None:
-        logging.info("Loading Whisper model...")
-        model = whisper.load_model("base")  # change to "medium" or "large" if needed
+    # Download transcoded video
+    download_from_gcs(TRANSCODED_BUCKET, f"{asset_id}_normalized.mp4", local_video)
 
-    input_path = f"/videos/{request.file_name}"
-    audio_path = f"/audio/{request.file_name.replace('.', '_')}.wav"
+    # Extract audio with ffmpeg
+    subprocess.run([
+        "ffmpeg", "-y", "-i", local_video,
+        "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+        local_audio
+    ], check=True)
 
-    os.makedirs("/audio", exist_ok=True)
+    # Upload audio to GCS
+    gcs_audio = upload_to_gcs(AUDIO_BUCKET, f"{asset_id}.wav", local_audio)
 
-    if not extract_audio(input_path, audio_path):
-        return TranscribeResponse(status="error", transcript=None)
+    # Run Whisper transcription
+    result = model.transcribe(local_audio)
 
-    try:
-        result = model.transcribe(audio_path, language=request.language)
-        transcript = result.get("text", "").strip()
-        logging.info("Transcription complete for %s", request.file_name)
-        return TranscribeResponse(status="success", transcript=transcript)
-    except Exception as e:
-        logging.error("Transcription failed: %s", e)
-        return TranscribeResponse(status="error", transcript=None)
+    transcript_json = {
+        "text": result["text"],
+        "language": result.get("language", "en"),
+        "segments": result.get("segments", []),
+        "confidence": None  # Whisper doesn’t provide confidence, can be added if post-processed
+    }
+
+    # Save transcript JSON to GCS
+    with open(local_transcript, "w") as f:
+        json.dump(transcript_json, f, indent=2)
+    gcs_transcript = upload_to_gcs(TRANSCRIPTS_BUCKET, f"{asset_id}.json", local_transcript)
+
+    # Build response JSON
+    return {
+        "asset_id": asset_id,
+        "paths": {
+            "transcoded": transcoded_path,
+            "audio": gcs_audio,
+            "transcript": gcs_transcript
+        },
+        "transcript": transcript_json,
+        "status": "transcribed",
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
