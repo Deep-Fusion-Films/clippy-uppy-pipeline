@@ -12,7 +12,9 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
 # Initialize Firestore client
-db = firestore.Client()
+project_id = os.getenv("FIRESTORE_PROJECT_ID", "deepfusion-clippyuppy-pipeline")
+database_id = os.getenv("FIRESTORE_DATABASE_ID", "default")
+db = firestore.Client(project=project_id, database=database_id)
 
 # Optionally initialize Cloud Storage client
 storage_client = storage.Client()
