@@ -46,6 +46,23 @@ def download_to_gcs(url: str, asset_id: str) -> str:
     blob.upload_from_string(resp.content)
     return f"gs://{bucket_name}/raw/{asset_id}.mp4"
 
+def search_assets(count: int = 10, phrase: str = "nature") -> list:
+    """
+    Search Getty API for a batch of assets.
+    """
+    token = get_access_token()
+    headers = {
+        "Api-Key": GETTY_CLIENT_ID,
+        "Authorization": f"Bearer {token}"
+    }
+    resp = requests.get(
+        f"https://api.gettyimages.com/v3/search/videos?phrase={phrase}&page_size={count}",
+        headers=headers
+    )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=f"Getty search error: {resp.text}")
+    return [video["id"] for video in resp.json().get("videos", [])]
+
 @app.get("/health")
 def health():
     """
@@ -61,50 +78,50 @@ def health():
 @app.post("/validate")
 async def validate(req: Request):
     """
-    Validate a Getty asset by ID:
-      1. Fetch metadata from Getty API
-      2. Download the file into GCS
-      3. Return structured JSON block
+    Auto-fetch Getty assets:
+      1. Search Getty for N assets (default 10, phrase 'nature')
+      2. Fetch metadata for each
+      3. Download files into GCS
+      4. Return structured JSON blocks
     """
     data = await req.json()
-    asset_id = data.get("asset_id")
-    if not asset_id:
-        raise HTTPException(status_code=400, detail="asset_id required")
+    phrase = data.get("phrase", "nature")
+    count = int(data.get("count", 10))
 
-    # Fetch fresh token
-    token = get_access_token()
-    headers = {
-        "Api-Key": GETTY_CLIENT_ID,
-        "Authorization": f"Bearer {token}"
-    }
+    asset_ids = search_assets(count=count, phrase=phrase)
+    results = []
 
-    # Fetch metadata from Getty
-    resp = requests.get(f"https://api.gettyimages.com/v3/assets/{asset_id}", headers=headers)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=f"Getty asset error: {resp.text}")
+    for asset_id in asset_ids:
+        token = get_access_token()
+        headers = {
+            "Api-Key": GETTY_CLIENT_ID,
+            "Authorization": f"Bearer {token}"
+        }
+        resp = requests.get(f"https://api.gettyimages.com/v3/assets/{asset_id}", headers=headers)
+        if resp.status_code != 200:
+            continue  # skip failed assets
+        asset = resp.json().get("asset")
+        if not asset:
+            continue
 
-    asset = resp.json().get("asset")
-    if not asset:
-        raise HTTPException(status_code=500, detail="No asset data returned from Getty")
+        download_url = asset.get("file_download_url")
+        if not download_url:
+            continue
 
-    # Download file to GCS
-    download_url = asset.get("file_download_url")
-    if not download_url:
-        raise HTTPException(status_code=500, detail="No download URL in Getty metadata")
+        gcs_path = download_to_gcs(download_url, asset_id)
 
-    gcs_path = download_to_gcs(download_url, asset_id)
+        results.append({
+            "asset_id": asset_id,
+            "paths": {"raw": gcs_path},
+            "getty": {
+                "title": asset.get("title"),
+                "caption": asset.get("caption"),
+                "keywords": asset.get("keywords", []),
+                "credit_line": asset.get("artist"),
+                "download_url": download_url
+            },
+            "status": "fetched",
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        })
 
-    # Build JSON block
-    return {
-        "asset_id": asset_id,
-        "paths": {"raw": gcs_path},
-        "getty": {
-            "title": asset.get("title"),
-            "caption": asset.get("caption"),
-            "keywords": asset.get("keywords", []),
-            "credit_line": asset.get("artist"),
-            "download_url": download_url
-        },
-        "status": "fetched",
-        "timestamp": datetime.utcnow().isoformat() + "Z"
-    }
+    return {"assets": results}
