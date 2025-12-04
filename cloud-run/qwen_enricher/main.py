@@ -1,73 +1,88 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import Optional, List
 import os
-import logging
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+import json
+from datetime import datetime
+from fastapi import FastAPI, Request
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-
-# Initialize FastAPI app
 app = FastAPI()
 
-# Global model/tokenizer reference (lazy load)
-model = None
-tokenizer = None
-generator = None
+# Environment variables (configure model settings as needed)
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen2.5")   # placeholder name for your chosen local/open-source model
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
 
-# Request schema
-class EnrichRequest(BaseModel):
-    text: str                     # Input text (caption, transcript, etc.)
-    tasks: Optional[List[str]] = ["caption", "summary", "tags", "readme"]
-
-# Response schema
-class EnrichResponse(BaseModel):
-    status: str
-    outputs: dict
-
-# Health check endpoint (required for Cloud Run)
-@app.get("/")
+@app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {
+        "status": "ok",
+        "QWEN_MODEL": QWEN_MODEL,
+        "MAX_TOKENS": MAX_TOKENS,
+        "TEMPERATURE": TEMPERATURE
+    }
 
-# Lazy model loader
-def load_qwen_model():
-    global model, tokenizer, generator
-    if model is None or tokenizer is None or generator is None:
-        model_name = os.getenv("MODEL_NAME", "Qwen/Qwen1.5-7B-Chat")
-        logging.info(f"Loading Qwen model: {model_name}")
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
-        generator = pipeline("text-generation", model=model, tokenizer=tokenizer)
+def build_prompt(asset_json: dict) -> str:
+    """Create a deterministic prompt from prior blocks."""
+    title = asset_json.get("getty", {}).get("title", "")
+    caption = asset_json.get("getty", {}).get("caption", "")
+    keywords = asset_json.get("getty", {}).get("keywords", [])
+    tech = asset_json.get("technical", {})
+    transcript_text = asset_json.get("transcript", {}).get("text", "")
+    frames = asset_json.get("frames", {})
+    objects = frames.get("objects_detected", [])
+    dominant_colors = frames.get("dominant_colors", [])
 
-# API endpoint
-@app.post("/enrich", response_model=EnrichResponse)
-async def enrich(request: EnrichRequest):
-    try:
-        load_qwen_model()
-        outputs = {}
+    prompt = f"""
+You are an editorial enrichment assistant.
+Asset title: {title}
+Caption: {caption}
+Keywords: {", ".join(keywords)}
+Technical: codec={tech.get("codec")}, resolution={tech.get("resolution")}, duration={tech.get("duration")}
+Transcript (truncated): {transcript_text[:300]}
+Objects detected: {", ".join(objects)}
+Dominant colors: {", ".join(dominant_colors)}
 
-        for task in request.tasks:
-            prompt = ""
-            if task == "caption":
-                prompt = f"Rewrite this caption to be editorially strong:\n{request.text}"
-            elif task == "summary":
-                prompt = f"Summarize the following transcript:\n{request.text}"
-            elif task == "tags":
-                prompt = f"Suggest 5 editorial tags for:\n{request.text}"
-            elif task == "readme":
-                prompt = f"Draft a README-style description for:\n{request.text}"
-            else:
-                continue
+Produce JSON with:
+- "summary": 3-4 sentence editorial summary, factual, non-sensational.
+- "tags": 8-12 concise tags (lowercase, hyphenated if multiword).
+- "tone": single word descriptor ("informative", "documentary", "cinematic", etc.).
 
-            logging.info(f"Running Qwen task: {task}")
-            result = generator(prompt, max_length=256, do_sample=True, top_p=0.9)[0]["generated_text"]
-            outputs[task] = result.strip()
+Return only JSON, no extra text.
+"""
+    return prompt.strip()
 
-        return EnrichResponse(status="success", outputs=outputs)
+def run_qwen(prompt: str) -> dict:
+    """
+    Placeholder inference function.
+    Replace with your local model call or API client.
+    Must return a dict with keys: summary, tags, tone.
+    """
+    # Deterministic stub for pipeline integration; swap with real model call.
+    return {
+        "summary": "A grounded editorial overview of the asset’s content, context, and visual narrative.",
+        "tags": [
+            "documentary", "cinematic", "travel", "outdoor",
+            "nature", "landscape", "wide-shot", "color-rich"
+        ],
+        "tone": "informative"
+    }
 
-    except Exception as e:
-        logging.error("Qwen enrichment failed: %s", e)
-        return EnrichResponse(status="error", outputs={})
+@app.post("/enrich")
+async def enrich(req: Request):
+    """
+    Input: unified JSON (partial) containing getty, technical, transcript, frames, paths.
+    Output: same JSON plus 'qwen' block with summary, tags, tone.
+    """
+    asset_json = await req.json()
+    asset_id = asset_json.get("asset_id")
 
+    prompt = build_prompt(asset_json)
+    qwen_out = run_qwen(prompt)
+
+    asset_json["qwen"] = {
+        "summary": qwen_out.get("summary"),
+        "tags": qwen_out.get("tags", []),
+        "tone": qwen_out.get("tone")
+    }
+    asset_json["status"] = "enriched"
+    asset_json["timestamp"] = datetime.utcnow().isoformat() + "Z"
+
+    return asset_json
