@@ -1,7 +1,8 @@
 import os
+import random
 import requests
 from fastapi import FastAPI, Request, HTTPException
-from google.cloud import storage
+from google.cloud import storage, firestore
 from datetime import datetime
 
 app = FastAPI()
@@ -11,14 +12,12 @@ ASSETS_BUCKET = os.getenv("ASSETS_BUCKET")  # e.g. gs://df-films-assets-euw1
 GETTY_CLIENT_ID = os.getenv("GETTY_CLIENT_ID")
 GETTY_CLIENT_SECRET = os.getenv("GETTY_CLIENT_SECRET")
 
-# GCS client
+# GCS + Firestore clients
 storage_client = storage.Client()
+db = firestore.Client()
 
 def get_access_token() -> str:
-    """
-    Always fetch a fresh OAuth2 token from Getty.
-    Tokens expire after ~3600s, so this guarantees validity.
-    """
+    """Always fetch a fresh OAuth2 token from Getty."""
     resp = requests.post(
         "https://api.gettyimages.com/oauth2/token",
         data={
@@ -31,10 +30,12 @@ def get_access_token() -> str:
         raise HTTPException(status_code=resp.status_code, detail=f"Getty token error: {resp.text}")
     return resp.json()["access_token"]
 
+def already_processed(asset_id: str) -> bool:
+    """Check Firestore to see if asset_id has already been processed."""
+    return db.collection("assets").document(asset_id).get().exists
+
 def download_to_gcs(url: str, asset_id: str) -> str:
-    """
-    Download Getty asset and store in GCS raw/ folder.
-    """
+    """Download Getty asset and store in GCS raw/ folder."""
     bucket_name = ASSETS_BUCKET.replace("gs://", "")
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(f"raw/{asset_id}.mp4")
@@ -46,17 +47,16 @@ def download_to_gcs(url: str, asset_id: str) -> str:
     blob.upload_from_string(resp.content)
     return f"gs://{bucket_name}/raw/{asset_id}.mp4"
 
-def search_assets(count: int = 10, phrase: str = "nature") -> list:
-    """
-    Search Getty API for a batch of assets.
-    """
+def search_assets(count: int = 10) -> list:
+    """Search Getty API for a random batch of assets (no keyword)."""
     token = get_access_token()
     headers = {
         "Api-Key": GETTY_CLIENT_ID,
         "Authorization": f"Bearer {token}"
     }
+    page = random.randint(1, 100)  # randomize to avoid same results
     resp = requests.get(
-        f"https://api.gettyimages.com/v3/search/videos?phrase={phrase}&page_size={count}",
+        f"https://api.gettyimages.com/v3/search/videos?page_size={count}&page={page}",
         headers=headers
     )
     if resp.status_code != 200:
@@ -65,9 +65,7 @@ def search_assets(count: int = 10, phrase: str = "nature") -> list:
 
 @app.get("/health")
 def health():
-    """
-    Health check endpoint to confirm env vars and bucket wiring.
-    """
+    """Health check endpoint to confirm env vars and bucket wiring."""
     return {
         "status": "ok",
         "ASSETS_BUCKET": ASSETS_BUCKET,
@@ -79,19 +77,21 @@ def health():
 async def validate(req: Request):
     """
     Auto-fetch Getty assets:
-      1. Search Getty for N assets (default 10, phrase 'nature')
-      2. Fetch metadata for each
-      3. Download files into GCS
+      1. Search Getty for N random assets (default 10)
+      2. Skip duplicates already in Firestore
+      3. Fetch metadata + download into GCS
       4. Return structured JSON blocks
     """
     data = await req.json()
-    phrase = data.get("phrase", "nature")
     count = int(data.get("count", 10))
 
-    asset_ids = search_assets(count=count, phrase=phrase)
+    asset_ids = search_assets(count=count)
     results = []
 
     for asset_id in asset_ids:
+        if already_processed(asset_id):
+            continue  # skip duplicates
+
         token = get_access_token()
         headers = {
             "Api-Key": GETTY_CLIENT_ID,
@@ -99,7 +99,7 @@ async def validate(req: Request):
         }
         resp = requests.get(f"https://api.gettyimages.com/v3/assets/{asset_id}", headers=headers)
         if resp.status_code != 200:
-            continue  # skip failed assets
+            continue
         asset = resp.json().get("asset")
         if not asset:
             continue
@@ -109,6 +109,12 @@ async def validate(req: Request):
             continue
 
         gcs_path = download_to_gcs(download_url, asset_id)
+
+        # Write stub record into Firestore immediately
+        db.collection("assets").document(asset_id).set({
+            "status": "processed",
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        })
 
         results.append({
             "asset_id": asset_id,
