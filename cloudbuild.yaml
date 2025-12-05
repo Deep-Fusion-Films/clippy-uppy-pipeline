@@ -10,7 +10,7 @@ steps:
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest', './cloud-run/start_pipeline']
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
     'run','deploy','start-pipeline',
@@ -30,7 +30,7 @@ steps:
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest', './cloud-run/transcode']
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
     'run','deploy','transcode-service',
@@ -51,7 +51,7 @@ steps:
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest', './cloud-run/transcribe']
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
     'run','deploy','transcribe-service',
@@ -72,7 +72,7 @@ steps:
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest', './cloud-run/sample_frames']
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
     'run','deploy','sample-frames-service',
@@ -93,7 +93,7 @@ steps:
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest', './cloud-run/getty_enricher']
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
     'run','deploy','getty-enricher-service',
@@ -114,7 +114,7 @@ steps:
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest', './cloud-run/qwen_enricher']
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
     'run','deploy','qwen-enricher-service',
@@ -135,7 +135,7 @@ steps:
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest', './cloud-run/store_metadata']
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
     'run','deploy','store-metadata-service',
