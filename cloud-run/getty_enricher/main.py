@@ -1,6 +1,7 @@
 import os
 import random
 import requests
+import logging
 from datetime import datetime
 from typing import List, Dict, Any
 
@@ -14,6 +15,9 @@ GETTY_CLIENT_ID = os.getenv("GETTY_CLIENT_ID")
 GETTY_CLIENT_SECRET = os.getenv("GETTY_CLIENT_SECRET")
 
 REQUEST_TIMEOUT = 30  # seconds
+
+# Use uvicorn's logger so messages appear in Cloud Run logs
+logger = logging.getLogger("uvicorn.error")
 
 
 def require_env(var_name: str) -> str:
@@ -52,14 +56,17 @@ def get_access_token() -> str:
             timeout=REQUEST_TIMEOUT,
         )
     except requests.RequestException as e:
+        logger.error(f"Getty token request failed: {e}")
         raise HTTPException(status_code=502, detail=f"Getty token request failed: {e}")
 
     if resp.status_code != 200:
+        logger.error(f"Getty token error {resp.status_code}: {resp.text}")
         raise HTTPException(status_code=resp.status_code, detail=f"Getty token error: {resp.text}")
 
     data = resp.json()
     token = data.get("access_token")
     if not token:
+        logger.error("Getty token response missing access_token")
         raise HTTPException(status_code=502, detail="Getty token response missing access_token")
     return token
 
@@ -83,9 +90,11 @@ def search_assets(count: int = 10) -> List[str]:
             timeout=REQUEST_TIMEOUT,
         )
     except requests.RequestException as e:
+        logger.error(f"Getty search request failed: {e}")
         raise HTTPException(status_code=502, detail=f"Getty search request failed: {e}")
 
     if resp.status_code != 200:
+        logger.error(f"Getty search error {resp.status_code}: {resp.text}")
         raise HTTPException(status_code=resp.status_code, detail=f"Getty search error: {resp.text}")
 
     videos = resp.json().get("videos", [])
@@ -115,13 +124,16 @@ def fetch_asset_metadata(asset_id: str) -> Dict[str, Any]:
             timeout=REQUEST_TIMEOUT,
         )
     except requests.RequestException as e:
+        logger.error(f"Getty asset request failed for {asset_id}: {e}")
         raise HTTPException(status_code=502, detail=f"Getty asset request failed: {e}")
 
     if resp.status_code != 200:
+        logger.error(f"Getty asset fetch failed for {asset_id}: {resp.status_code} {resp.text}")
         raise HTTPException(status_code=resp.status_code, detail=f"Getty asset error: {resp.text}")
 
     asset = resp.json().get("asset")
     if not asset:
+        logger.error(f"No asset data returned for id {asset_id}")
         raise HTTPException(status_code=404, detail=f"No asset data returned for id {asset_id}")
     return asset
 
@@ -137,12 +149,13 @@ def download_to_gcs(url: str, asset_id: str) -> str:
     try:
         resp = requests.get(url, stream=True, timeout=REQUEST_TIMEOUT)
     except requests.RequestException as e:
+        logger.error(f"Download request failed for {asset_id}: {e}")
         raise HTTPException(status_code=502, detail=f"Download request failed: {e}")
 
     if resp.status_code != 200:
+        logger.error(f"Download error {resp.status_code} for {asset_id}: {resp.text}")
         raise HTTPException(status_code=resp.status_code, detail=f"Download error: {resp.text}")
 
-    # Upload content to GCS
     blob.upload_from_string(resp.content)
     return f"gs://{bucket_name}/raw/{asset_id}.mp4"
 
@@ -167,7 +180,6 @@ def write_stub_record(asset_id: str, getty: Dict[str, Any], gcs_path: str) -> No
 
 @app.get("/health")
 def health():
-    """Lightweight health endpoint. Ensures app imports and responds quickly."""
     return {
         "status": "ok",
         "has_assets_bucket": bool(ASSETS_BUCKET),
@@ -178,10 +190,6 @@ def health():
 
 @app.post("/validate")
 async def validate(req: Request):
-    """
-    Fetch N random Getty video assets, skip duplicates, download to GCS, and record stubs in Firestore.
-    Request body: {"count": <int, default 10>}
-    """
     body = await req.json()
     try:
         count = int(body.get("count", 10))
@@ -192,86 +200,63 @@ async def validate(req: Request):
     results: List[Dict[str, Any]] = []
 
     for asset_id in asset_ids:
-        # Skip if already processed
         if already_processed(asset_id):
-            results.append(
-                {
-                    "asset_id": asset_id,
-                    "status": "skipped_duplicate",
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-            )
+            results.append({
+                "asset_id": asset_id,
+                "status": "skipped_duplicate",
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            })
             continue
 
-        # Fetch metadata
         try:
             asset = fetch_asset_metadata(asset_id)
         except HTTPException as e:
-            results.append(
-                {
-                    "asset_id": asset_id,
-                    "status": "metadata_error",
-                    "detail": e.detail,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-            )
+            results.append({
+                "asset_id": asset_id,
+                "status": "metadata_error",
+                "detail": e.detail,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            })
             continue
 
         download_url = asset.get("file_download_url")
         if not download_url:
-            results.append(
-                {
-                    "asset_id": asset_id,
-                    "status": "no_download_url",
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-            )
+            results.append({
+                "asset_id": asset_id,
+                "status": "no_download_url",
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            })
             continue
 
-        # Download and store in GCS
         try:
             gcs_path = download_to_gcs(download_url, asset_id)
         except HTTPException as e:
-            results.append(
-                {
-                    "asset_id": asset_id,
-                    "status": "download_error",
-                    "detail": e.detail,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-            )
+            results.append({
+                "asset_id": asset_id,
+                "status": "download_error",
+                "detail": e.detail,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            })
             continue
 
-        # Write stub record to Firestore
         try:
             write_stub_record(asset_id, asset, gcs_path)
         except Exception as e:
-            results.append(
-                {
-                    "asset_id": asset_id,
-                    "paths": {"raw": gcs_path},
-                    "status": "firestore_error",
-                    "detail": str(e),
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-            )
-            continue
-
-        # Success
-        results.append(
-            {
+            logger.error(f"Firestore write failed for {asset_id}: {e}")
+            results.append({
                 "asset_id": asset_id,
                 "paths": {"raw": gcs_path},
-                "getty": {
-                    "title": asset.get("title"),
-                    "caption": asset.get("caption"),
-                    "keywords": asset.get("keywords", []),
-                    "credit_line": asset.get("artist"),
-                    "download_url": download_url,
-                },
-                "status": "fetched",
+                "status": "firestore_error",
+                "detail": str(e),
                 "timestamp": datetime.utcnow().isoformat() + "Z",
-            }
-        )
+            })
+            continue
 
-    return {"assets": results}
+        results.append({
+            "asset_id": asset_id,
+            "paths": {"raw": gcs_path},
+            "getty": {
+                "title": asset.get("title"),
+                "caption": asset.get("caption"),
+                "keywords": asset.get("keywords", []),
+                "credit_line
