@@ -12,9 +12,13 @@ ASSETS_BUCKET = os.getenv("ASSETS_BUCKET")  # e.g. gs://df-films-assets-euw1
 GETTY_CLIENT_ID = os.getenv("GETTY_CLIENT_ID")
 GETTY_CLIENT_SECRET = os.getenv("GETTY_CLIENT_SECRET")
 
-# GCS + Firestore clients
-storage_client = storage.Client()
-db = firestore.Client()
+def get_storage_client():
+    """Create a new GCS client when needed."""
+    return storage.Client()
+
+def get_firestore_client():
+    """Create a new Firestore client when needed."""
+    return firestore.Client()
 
 def get_access_token() -> str:
     """Always fetch a fresh OAuth2 token from Getty."""
@@ -32,10 +36,12 @@ def get_access_token() -> str:
 
 def already_processed(asset_id: str) -> bool:
     """Check Firestore to see if asset_id has already been processed."""
+    db = get_firestore_client()
     return db.collection("assets").document(asset_id).get().exists
 
 def download_to_gcs(url: str, asset_id: str) -> str:
     """Download Getty asset and store in GCS raw/ folder."""
+    storage_client = get_storage_client()
     bucket_name = ASSETS_BUCKET.replace("gs://", "")
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(f"raw/{asset_id}.mp4")
@@ -87,6 +93,8 @@ async def validate(req: Request):
 
     asset_ids = search_assets(count=count)
     results = []
+
+    db = get_firestore_client()
 
     for asset_id in asset_ids:
         if already_processed(asset_id):
