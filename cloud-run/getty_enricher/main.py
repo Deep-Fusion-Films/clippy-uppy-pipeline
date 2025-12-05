@@ -1,141 +1,277 @@
 import os
 import random
 import requests
-from fastapi import FastAPI, Request, HTTPException
-from google.cloud import storage, firestore
 from datetime import datetime
+from typing import List, Dict, Any
+
+from fastapi import FastAPI, Request, HTTPException
 
 app = FastAPI()
 
-# Environment variables (mounted from Secret Manager in Cloud Run)
-ASSETS_BUCKET = os.getenv("ASSETS_BUCKET")  # e.g. gs://df-films-assets-euw1
+# Environment variables (mounted via Cloud Run -> Variables & Secrets)
+ASSETS_BUCKET = os.getenv("ASSETS_BUCKET")  # e.g. "gs://df-films-assets-euw1"
 GETTY_CLIENT_ID = os.getenv("GETTY_CLIENT_ID")
 GETTY_CLIENT_SECRET = os.getenv("GETTY_CLIENT_SECRET")
 
+REQUEST_TIMEOUT = 30  # seconds
+
+
+def require_env(var_name: str) -> str:
+    """Fetch required env var, raise 500 if missing."""
+    val = os.getenv(var_name)
+    if not val:
+        raise HTTPException(status_code=500, detail=f"Missing required environment variable: {var_name}")
+    return val
+
+
 def get_storage_client():
-    """Create a new GCS client when needed."""
+    """Create a new GCS client on demand."""
+    from google.cloud import storage
     return storage.Client()
 
+
 def get_firestore_client():
-    """Create a new Firestore client when needed."""
+    """Create a new Firestore client on demand."""
+    from google.cloud import firestore
     return firestore.Client()
 
+
 def get_access_token() -> str:
-    """Always fetch a fresh OAuth2 token from Getty."""
-    resp = requests.post(
-        "https://api.gettyimages.com/oauth2/token",
-        data={
-            "client_id": GETTY_CLIENT_ID,
-            "client_secret": GETTY_CLIENT_SECRET,
-            "grant_type": "client_credentials"
-        }
-    )
+    """Fetch a fresh OAuth2 token from Getty."""
+    client_id = require_env("GETTY_CLIENT_ID")
+    client_secret = require_env("GETTY_CLIENT_SECRET")
+
+    try:
+        resp = requests.post(
+            "https://api.gettyimages.com/oauth2/token",
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "client_credentials",
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Getty token request failed: {e}")
+
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=f"Getty token error: {resp.text}")
-    return resp.json()["access_token"]
+
+    data = resp.json()
+    token = data.get("access_token")
+    if not token:
+        raise HTTPException(status_code=502, detail="Getty token response missing access_token")
+    return token
+
+
+def search_assets(count: int = 10) -> List[str]:
+    """Search Getty for a random page of video assets and return their IDs."""
+    token = get_access_token()
+    client_id = require_env("GETTY_CLIENT_ID")
+
+    headers = {
+        "Api-Key": client_id,
+        "Authorization": f"Bearer {token}",
+    }
+    page = random.randint(1, 100)
+
+    try:
+        resp = requests.get(
+            "https://api.gettyimages.com/v3/search/videos",
+            headers=headers,
+            params={"page_size": count, "page": page},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Getty search request failed: {e}")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=f"Getty search error: {resp.text}")
+
+    videos = resp.json().get("videos", [])
+    return [v.get("id") for v in videos if v.get("id")]
+
 
 def already_processed(asset_id: str) -> bool:
-    """Check Firestore to see if asset_id has already been processed."""
+    """Return True if the asset document exists in Firestore."""
     db = get_firestore_client()
-    return db.collection("assets").document(asset_id).get().exists
+    doc = db.collection("assets").document(asset_id).get()
+    return doc.exists
+
+
+def fetch_asset_metadata(asset_id: str) -> Dict[str, Any]:
+    """Fetch Getty metadata for a single asset."""
+    token = get_access_token()
+    client_id = require_env("GETTY_CLIENT_ID")
+    headers = {
+        "Api-Key": client_id,
+        "Authorization": f"Bearer {token}",
+    }
+
+    try:
+        resp = requests.get(
+            f"https://api.gettyimages.com/v3/assets/{asset_id}",
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Getty asset request failed: {e}")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=f"Getty asset error: {resp.text}")
+
+    asset = resp.json().get("asset")
+    if not asset:
+        raise HTTPException(status_code=404, detail=f"No asset data returned for id {asset_id}")
+    return asset
+
 
 def download_to_gcs(url: str, asset_id: str) -> str:
-    """Download Getty asset and store in GCS raw/ folder."""
+    """Download the Getty file and upload it into GCS under raw/{asset_id}.mp4."""
+    bucket_uri = require_env("ASSETS_BUCKET")
+    bucket_name = bucket_uri.replace("gs://", "")
     storage_client = get_storage_client()
-    bucket_name = ASSETS_BUCKET.replace("gs://", "")
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(f"raw/{asset_id}.mp4")
 
-    resp = requests.get(url, stream=True)
+    try:
+        resp = requests.get(url, stream=True, timeout=REQUEST_TIMEOUT)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Download request failed: {e}")
+
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=f"Download error: {resp.text}")
 
+    # Upload content to GCS
     blob.upload_from_string(resp.content)
     return f"gs://{bucket_name}/raw/{asset_id}.mp4"
 
-def search_assets(count: int = 10) -> list:
-    """Search Getty API for a random batch of assets (no keyword)."""
-    token = get_access_token()
-    headers = {
-        "Api-Key": GETTY_CLIENT_ID,
-        "Authorization": f"Bearer {token}"
-    }
-    page = random.randint(1, 100)  # randomize to avoid same results
-    resp = requests.get(
-        f"https://api.gettyimages.com/v3/search/videos?page_size={count}&page={page}",
-        headers=headers
+
+def write_stub_record(asset_id: str, getty: Dict[str, Any], gcs_path: str) -> None:
+    """Write a minimal 'processed' document into Firestore."""
+    db = get_firestore_client()
+    db.collection("assets").document(asset_id).set(
+        {
+            "status": "processed",
+            "paths": {"raw": gcs_path},
+            "getty": {
+                "title": getty.get("title"),
+                "caption": getty.get("caption"),
+                "keywords": getty.get("keywords", []),
+                "credit_line": getty.get("artist"),
+            },
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
     )
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=f"Getty search error: {resp.text}")
-    return [video["id"] for video in resp.json().get("videos", [])]
+
 
 @app.get("/health")
 def health():
-    """Health check endpoint to confirm env vars and bucket wiring."""
+    """Lightweight health endpoint. Ensures app imports and responds quickly."""
     return {
         "status": "ok",
-        "ASSETS_BUCKET": ASSETS_BUCKET,
-        "GETTY_CLIENT_ID": bool(GETTY_CLIENT_ID),
-        "GETTY_CLIENT_SECRET": bool(GETTY_CLIENT_SECRET)
+        "has_assets_bucket": bool(ASSETS_BUCKET),
+        "has_getty_client_id": bool(GETTY_CLIENT_ID),
+        "has_getty_client_secret": bool(GETTY_CLIENT_SECRET),
     }
+
 
 @app.post("/validate")
 async def validate(req: Request):
     """
-    Auto-fetch Getty assets:
-      1. Search Getty for N random assets (default 10)
-      2. Skip duplicates already in Firestore
-      3. Fetch metadata + download into GCS
-      4. Return structured JSON blocks
+    Fetch N random Getty video assets, skip duplicates, download to GCS, and record stubs in Firestore.
+    Request body: {"count": <int, default 10>}
     """
-    data = await req.json()
-    count = int(data.get("count", 10))
+    body = await req.json()
+    try:
+        count = int(body.get("count", 10))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid 'count' value. Must be an integer.")
 
     asset_ids = search_assets(count=count)
-    results = []
-
-    db = get_firestore_client()
+    results: List[Dict[str, Any]] = []
 
     for asset_id in asset_ids:
+        # Skip if already processed
         if already_processed(asset_id):
-            continue  # skip duplicates
-
-        token = get_access_token()
-        headers = {
-            "Api-Key": GETTY_CLIENT_ID,
-            "Authorization": f"Bearer {token}"
-        }
-        resp = requests.get(f"https://api.gettyimages.com/v3/assets/{asset_id}", headers=headers)
-        if resp.status_code != 200:
+            results.append(
+                {
+                    "asset_id": asset_id,
+                    "status": "skipped_duplicate",
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+            )
             continue
-        asset = resp.json().get("asset")
-        if not asset:
+
+        # Fetch metadata
+        try:
+            asset = fetch_asset_metadata(asset_id)
+        except HTTPException as e:
+            results.append(
+                {
+                    "asset_id": asset_id,
+                    "status": "metadata_error",
+                    "detail": e.detail,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+            )
             continue
 
         download_url = asset.get("file_download_url")
         if not download_url:
+            results.append(
+                {
+                    "asset_id": asset_id,
+                    "status": "no_download_url",
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+            )
             continue
 
-        gcs_path = download_to_gcs(download_url, asset_id)
+        # Download and store in GCS
+        try:
+            gcs_path = download_to_gcs(download_url, asset_id)
+        except HTTPException as e:
+            results.append(
+                {
+                    "asset_id": asset_id,
+                    "status": "download_error",
+                    "detail": e.detail,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+            )
+            continue
 
-        # Write stub record into Firestore immediately
-        db.collection("assets").document(asset_id).set({
-            "status": "processed",
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        })
+        # Write stub record to Firestore
+        try:
+            write_stub_record(asset_id, asset, gcs_path)
+        except Exception as e:
+            results.append(
+                {
+                    "asset_id": asset_id,
+                    "paths": {"raw": gcs_path},
+                    "status": "firestore_error",
+                    "detail": str(e),
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+            )
+            continue
 
-        results.append({
-            "asset_id": asset_id,
-            "paths": {"raw": gcs_path},
-            "getty": {
-                "title": asset.get("title"),
-                "caption": asset.get("caption"),
-                "keywords": asset.get("keywords", []),
-                "credit_line": asset.get("artist"),
-                "download_url": download_url
-            },
-            "status": "fetched",
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        })
+        # Success
+        results.append(
+            {
+                "asset_id": asset_id,
+                "paths": {"raw": gcs_path},
+                "getty": {
+                    "title": asset.get("title"),
+                    "caption": asset.get("caption"),
+                    "keywords": asset.get("keywords", []),
+                    "credit_line": asset.get("artist"),
+                    "download_url": download_url,
+                },
+                "status": "fetched",
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+        )
 
     return {"assets": results}
