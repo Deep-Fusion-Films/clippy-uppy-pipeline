@@ -21,7 +21,6 @@ logger = logging.getLogger("uvicorn.error")
 
 
 def require_env(var_name: str) -> str:
-    """Fetch required env var, raise 500 if missing."""
     val = os.getenv(var_name)
     if not val:
         raise HTTPException(status_code=500, detail=f"Missing required environment variable: {var_name}")
@@ -29,19 +28,16 @@ def require_env(var_name: str) -> str:
 
 
 def get_storage_client():
-    """Create a new GCS client on demand."""
     from google.cloud import storage
     return storage.Client()
 
 
 def get_firestore_client():
-    """Create a new Firestore client on demand."""
     from google.cloud import firestore
     return firestore.Client()
 
 
 def get_access_token() -> str:
-    """Fetch a fresh OAuth2 token from Getty."""
     client_id = require_env("GETTY_CLIENT_ID")
     client_secret = require_env("GETTY_CLIENT_SECRET")
 
@@ -72,14 +68,10 @@ def get_access_token() -> str:
 
 
 def search_assets(count: int = 10) -> List[str]:
-    """Search Getty for a random page of video assets and return their IDs."""
     token = get_access_token()
     client_id = require_env("GETTY_CLIENT_ID")
 
-    headers = {
-        "Api-Key": client_id,
-        "Authorization": f"Bearer {token}",
-    }
+    headers = {"Api-Key": client_id, "Authorization": f"Bearer {token}"}
     page = random.randint(1, 100)
 
     try:
@@ -102,20 +94,15 @@ def search_assets(count: int = 10) -> List[str]:
 
 
 def already_processed(asset_id: str) -> bool:
-    """Return True if the asset document exists in Firestore."""
     db = get_firestore_client()
     doc = db.collection("assets").document(asset_id).get()
     return doc.exists
 
 
 def fetch_asset_metadata(asset_id: str) -> Dict[str, Any]:
-    """Fetch Getty metadata for a single asset."""
     token = get_access_token()
     client_id = require_env("GETTY_CLIENT_ID")
-    headers = {
-        "Api-Key": client_id,
-        "Authorization": f"Bearer {token}",
-    }
+    headers = {"Api-Key": client_id, "Authorization": f"Bearer {token}"}
 
     try:
         resp = requests.get(
@@ -139,7 +126,6 @@ def fetch_asset_metadata(asset_id: str) -> Dict[str, Any]:
 
 
 def download_to_gcs(url: str, asset_id: str) -> str:
-    """Download the Getty file and upload it into GCS under raw/{asset_id}.mp4."""
     bucket_uri = require_env("ASSETS_BUCKET")
     bucket_name = bucket_uri.replace("gs://", "")
     storage_client = get_storage_client()
@@ -161,7 +147,6 @@ def download_to_gcs(url: str, asset_id: str) -> str:
 
 
 def write_stub_record(asset_id: str, getty: Dict[str, Any], gcs_path: str) -> None:
-    """Write a minimal 'processed' document into Firestore."""
     db = get_firestore_client()
     db.collection("assets").document(asset_id).set(
         {
@@ -259,4 +244,11 @@ async def validate(req: Request):
                 "title": asset.get("title"),
                 "caption": asset.get("caption"),
                 "keywords": asset.get("keywords", []),
-                "credit_line
+                "credit_line": asset.get("artist"),
+                "download_url": download_url,
+            },
+            "status": "fetched",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        })
+
+    return {"assets": results}
