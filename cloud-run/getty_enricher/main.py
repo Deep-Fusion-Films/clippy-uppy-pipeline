@@ -254,3 +254,9 @@ async def validate(req: Request):
                 "keywords": asset.get("keywords", []),
                 "credit_line": asset.get("artist"),
                 "download_url": download_url,
+                },
+            "status": "fetched",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        })
+
+    return {"assets": results}
