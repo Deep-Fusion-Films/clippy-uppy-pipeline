@@ -1,18 +1,17 @@
 import os
-import random
 import requests
 import logging
 from datetime import datetime
 from typing import List, Dict, Any
-
 from fastapi import FastAPI, Request, HTTPException
 
 app = FastAPI()
 
 REQUEST_TIMEOUT = 30  # seconds
-
-# Use uvicorn's logger so messages appear in Cloud Run logs
 logger = logging.getLogger("uvicorn.error")
+
+# Track IDs we've already used so we don't repeat them
+_seen_ids: set[str] = set()
 
 
 def require_env(var_name: str) -> str:
@@ -63,33 +62,44 @@ def get_access_token() -> str:
 
 
 def search_assets(count: int = 10) -> List[str]:
+    """
+    Search Getty videos and return only fresh, accessible IDs with download URLs.
+    Avoid duplicates by tracking seen IDs.
+    """
     token = get_access_token()
     client_id = require_env("GETTY_CLIENT_ID")
-
     headers = {"Api-Key": client_id, "Authorization": f"Bearer {token}"}
-    page = random.randint(1, 100)
 
-    try:
+    ids: List[str] = []
+    page = 1
+
+    while len(ids) < count:
         resp = requests.get(
             "https://api.gettyimages.com/v3/search/videos",
             headers=headers,
             params={
-                "page_size": count,
+                "page_size": count * 2,
                 "page": page,
+                "asset_family": "creative",
+                "product_types": "easyaccess",
                 "fields": "id,title,caption,file_download_url"
             },
             timeout=REQUEST_TIMEOUT,
         )
-    except requests.RequestException as e:
-        logger.error(f"Getty search request failed: {e}")
-        raise HTTPException(status_code=502, detail=f"Getty search request failed: {e}")
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=f"Getty search error: {resp.text}")
 
-    if resp.status_code != 200:
-        logger.error(f"Getty search error {resp.status_code}: {resp.text}")
-        raise HTTPException(status_code=resp.status_code, detail=f"Getty search error: {resp.text}")
+        videos = resp.json().get("videos", [])
+        for v in videos:
+            vid = v.get("id")
+            if vid and v.get("file_download_url") and vid not in _seen_ids:
+                ids.append(vid)
+                _seen_ids.add(vid)
+                if len(ids) >= count:
+                    break
+        page += 1
 
-    videos = resp.json().get("videos", [])
-    return [v.get("id") for v in videos if v.get("id")]
+    return ids
 
 
 def already_processed(asset_id: str) -> bool:
@@ -103,32 +113,23 @@ def fetch_asset_metadata(asset_id: str) -> Dict[str, Any]:
     client_id = require_env("GETTY_CLIENT_ID")
     headers = {"Api-Key": client_id, "Authorization": f"Bearer {token}"}
 
-    try:
-        resp = requests.get(
-            f"https://api.gettyimages.com/v3/assets/{asset_id}",
-            headers=headers,
-            params={
-                "fields": "id,title,caption,keywords,artist,asset_family,allowed_use,usage_restrictions,"
-                          "collection_name,date_created,aspect_ratio,clip_length,editorial_segments,"
-                          "referral_destinations,preview,thumb,file_download_url"
-            },
-            timeout=REQUEST_TIMEOUT,
-        )
-    except requests.RequestException as e:
-        logger.error(f"Getty asset request failed for {asset_id}: {e}")
-        raise HTTPException(status_code=502, detail=f"Getty asset request failed: {e}")
-
+    resp = requests.get(
+        f"https://api.gettyimages.com/v3/assets/{asset_id}",
+        headers=headers,
+        params={
+            "fields": "id,title,caption,keywords,artist,asset_family,allowed_use,usage_restrictions,"
+                      "collection_name,date_created,aspect_ratio,clip_length,editorial_segments,"
+                      "referral_destinations,preview,thumb,file_download_url"
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
     if resp.status_code == 404:
-        logger.warning(f"Getty asset {asset_id} not found or inaccessible")
         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found or inaccessible")
-
     if resp.status_code != 200:
-        logger.error(f"Getty asset fetch failed for {asset_id}: {resp.status_code} {resp.text}")
         raise HTTPException(status_code=resp.status_code, detail=f"Getty asset error: {resp.text}")
 
     asset = resp.json().get("asset")
     if not asset:
-        logger.error(f"No asset data returned for id {asset_id}")
         raise HTTPException(status_code=404, detail=f"No asset data returned for id {asset_id}")
     return asset
 
@@ -140,14 +141,8 @@ def download_to_gcs(url: str, asset_id: str) -> str:
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(f"raw/{asset_id}.mp4")
 
-    try:
-        resp = requests.get(url, stream=True, timeout=REQUEST_TIMEOUT)
-    except requests.RequestException as e:
-        logger.error(f"Download request failed for {asset_id}: {e}")
-        raise HTTPException(status_code=502, detail=f"Download request failed: {e}")
-
+    resp = requests.get(url, stream=True, timeout=REQUEST_TIMEOUT)
     if resp.status_code != 200:
-        logger.error(f"Download error {resp.status_code} for {asset_id}: {resp.text}")
         raise HTTPException(status_code=resp.status_code, detail=f"Download error: {resp.text}")
 
     blob.upload_from_string(resp.content)
@@ -262,28 +257,9 @@ async def validate(req: Request):
         results.append({
             "asset_id": asset_id,
             "paths": {"raw": gcs_path},
-            "getty": {
-                "id": asset.get("id"),
-                "title": asset.get("title"),
-                "caption": asset.get("caption"),
-                "keywords": asset.get("keywords", []),
-                "artist": asset.get("artist"),
-                "asset_family": asset.get("asset_family"),
-                "allowed_use": asset.get("allowed_use"),
-                "usage_restrictions": asset.get("usage_restrictions"),
-                "collection_name": asset.get("collection_name"),
-                "date_created": asset.get("date_created"),
-                "aspect_ratio": asset.get("aspect_ratio"),
-                "clip_length": asset.get("clip_length"),
-                "editorial_segments": asset.get("editorial_segments"),
-                "referral_destinations": asset.get("referral_destinations"),
-                "preview": asset.get("preview"),
-                "thumb": asset.get("thumb"),
-                "download_url": download_url,
-            },
+            "getty": asset,
             "status": "fetched",
             "timestamp": datetime.utcnow().isoformat() + "Z",
         })
 
     return {"assets": results}
-
