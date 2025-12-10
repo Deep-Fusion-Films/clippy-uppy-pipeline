@@ -9,11 +9,6 @@ from fastapi import FastAPI, Request, HTTPException
 
 app = FastAPI()
 
-# Environment variables (mounted via Cloud Run -> Variables & Secrets)
-ASSETS_BUCKET = os.getenv("ASSETS_BUCKET")  # e.g. "gs://df-films-assets-euw1"
-GETTY_CLIENT_ID = os.getenv("GETTY_CLIENT_ID")
-GETTY_CLIENT_SECRET = os.getenv("GETTY_CLIENT_SECRET")
-
 REQUEST_TIMEOUT = 30  # seconds
 
 # Use uvicorn's logger so messages appear in Cloud Run logs
@@ -112,6 +107,11 @@ def fetch_asset_metadata(asset_id: str) -> Dict[str, Any]:
         resp = requests.get(
             f"https://api.gettyimages.com/v3/assets/{asset_id}",
             headers=headers,
+            params={
+                "fields": "id,title,caption,keywords,artist,asset_family,allowed_use,usage_restrictions,"
+                          "collection_name,date_created,aspect_ratio,clip_length,editorial_segments,"
+                          "referral_destinations,preview,thumb,file_download_url"
+            },
             timeout=REQUEST_TIMEOUT,
         )
     except requests.RequestException as e:
@@ -161,10 +161,23 @@ def write_stub_record(asset_id: str, getty: Dict[str, Any], gcs_path: str) -> No
             "status": "processed",
             "paths": {"raw": gcs_path},
             "getty": {
+                "id": getty.get("id"),
                 "title": getty.get("title"),
                 "caption": getty.get("caption"),
                 "keywords": getty.get("keywords", []),
-                "credit_line": getty.get("artist"),
+                "artist": getty.get("artist"),
+                "asset_family": getty.get("asset_family"),
+                "allowed_use": getty.get("allowed_use"),
+                "usage_restrictions": getty.get("usage_restrictions"),
+                "collection_name": getty.get("collection_name"),
+                "date_created": getty.get("date_created"),
+                "aspect_ratio": getty.get("aspect_ratio"),
+                "clip_length": getty.get("clip_length"),
+                "editorial_segments": getty.get("editorial_segments"),
+                "referral_destinations": getty.get("referral_destinations"),
+                "preview": getty.get("preview"),
+                "thumb": getty.get("thumb"),
+                "download_url": getty.get("file_download_url"),
             },
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
@@ -175,9 +188,9 @@ def write_stub_record(asset_id: str, getty: Dict[str, Any], gcs_path: str) -> No
 def health():
     return {
         "status": "ok",
-        "has_assets_bucket": bool(ASSETS_BUCKET),
-        "has_getty_client_id": bool(GETTY_CLIENT_ID),
-        "has_getty_client_secret": bool(GETTY_CLIENT_SECRET),
+        "has_assets_bucket": bool(os.getenv("ASSETS_BUCKET")),
+        "has_getty_client_id": bool(os.getenv("GETTY_CLIENT_ID")),
+        "has_getty_client_secret": bool(os.getenv("GETTY_CLIENT_SECRET")),
     }
 
 
@@ -245,18 +258,32 @@ async def validate(req: Request):
             })
             continue
 
+        # Success case
         results.append({
             "asset_id": asset_id,
             "paths": {"raw": gcs_path},
             "getty": {
+                "id": asset.get("id"),
                 "title": asset.get("title"),
                 "caption": asset.get("caption"),
                 "keywords": asset.get("keywords", []),
-                "credit_line": asset.get("artist"),
+                "artist": asset.get("artist"),
+                "asset_family": asset.get("asset_family"),
+                "allowed_use": asset.get("allowed_use"),
+                "usage_restrictions": asset.get("usage_restrictions"),
+                "collection_name": asset.get("collection_name"),
+                "date_created": asset.get("date_created"),
+                "aspect_ratio": asset.get("aspect_ratio"),
+                "clip_length": asset.get("clip_length"),
+                "editorial_segments": asset.get("editorial_segments"),
+                "referral_destinations": asset.get("referral_destinations"),
+                "preview": asset.get("preview"),
+                "thumb": asset.get("thumb"),
                 "download_url": download_url,
-                },
+            },
             "status": "fetched",
             "timestamp": datetime.utcnow().isoformat() + "Z",
         })
 
     return {"assets": results}
+
