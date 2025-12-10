@@ -78,7 +78,11 @@ def search_assets(count: int = 10) -> List[str]:
         resp = requests.get(
             "https://api.gettyimages.com/v3/search/videos",
             headers=headers,
-            params={"page_size": count, "page": page},
+            params={
+                "page_size": count,
+                "page": page,
+                "fields": "id,title,caption,file_download_url"
+            },
             timeout=REQUEST_TIMEOUT,
         )
     except requests.RequestException as e:
@@ -113,6 +117,10 @@ def fetch_asset_metadata(asset_id: str) -> Dict[str, Any]:
     except requests.RequestException as e:
         logger.error(f"Getty asset request failed for {asset_id}: {e}")
         raise HTTPException(status_code=502, detail=f"Getty asset request failed: {e}")
+
+    if resp.status_code == 404:
+        logger.warning(f"Getty asset {asset_id} not found or inaccessible")
+        raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found or inaccessible")
 
     if resp.status_code != 200:
         logger.error(f"Getty asset fetch failed for {asset_id}: {resp.status_code} {resp.text}")
@@ -246,9 +254,3 @@ async def validate(req: Request):
                 "keywords": asset.get("keywords", []),
                 "credit_line": asset.get("artist"),
                 "download_url": download_url,
-            },
-            "status": "fetched",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        })
-
-    return {"assets": results}
