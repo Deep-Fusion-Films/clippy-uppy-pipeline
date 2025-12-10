@@ -80,8 +80,7 @@ def search_assets(count: int = 10) -> List[str]:
             params={
                 "page_size": count * 2,
                 "page": page,
-                "asset_family": "creative",
-                "product_types": "easyaccess",
+                "product_types": "easyaccess",  # constrain to entitlement if supported
                 "fields": "id,title,caption,file_download_url"
             },
             timeout=REQUEST_TIMEOUT,
