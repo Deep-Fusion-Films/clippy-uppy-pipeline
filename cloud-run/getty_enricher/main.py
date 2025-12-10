@@ -1,6 +1,7 @@
 import os
 import requests
 import logging
+import asyncio
 from datetime import datetime
 from typing import List, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
@@ -10,8 +11,7 @@ app = FastAPI()
 REQUEST_TIMEOUT = 30  # seconds
 logger = logging.getLogger("uvicorn.error")
 
-# Track IDs we've already used so we don't repeat them
-_seen_ids: set[str] = set()
+_seen_ids: set[str] = set()  # track IDs we've already used
 
 
 def require_env(var_name: str) -> str:
@@ -34,7 +34,6 @@ def get_firestore_client():
 def get_access_token() -> str:
     client_id = require_env("GETTY_CLIENT_ID")
     client_secret = require_env("GETTY_CLIENT_SECRET")
-
     try:
         resp = requests.post(
             "https://api.gettyimages.com/oauth2/token",
@@ -50,22 +49,16 @@ def get_access_token() -> str:
         raise HTTPException(status_code=502, detail=f"Getty token request failed: {e}")
 
     if resp.status_code != 200:
-        logger.error(f"Getty token error {resp.status_code}: {resp.text}")
         raise HTTPException(status_code=resp.status_code, detail=f"Getty token error: {resp.text}")
 
-    data = resp.json()
-    token = data.get("access_token")
+    token = resp.json().get("access_token")
     if not token:
-        logger.error("Getty token response missing access_token")
         raise HTTPException(status_code=502, detail="Getty token response missing access_token")
     return token
 
 
-def search_assets(count: int = 10) -> List[str]:
-    """
-    Search Getty videos and return only fresh, accessible IDs with download URLs.
-    Avoid duplicates by tracking seen IDs.
-    """
+def search_assets(count: int = 2) -> List[str]:
+    """Search Getty videos and return only fresh, accessible IDs with download URLs."""
     token = get_access_token()
     client_id = require_env("GETTY_CLIENT_ID")
     headers = {"Api-Key": client_id, "Authorization": f"Bearer {token}"}
@@ -80,7 +73,6 @@ def search_assets(count: int = 10) -> List[str]:
             params={
                 "page_size": count * 2,
                 "page": page,
-                "product_types": "easyaccess",  # constrain to entitlement if supported
                 "fields": "id,title,caption,file_download_url"
             },
             timeout=REQUEST_TIMEOUT,
@@ -134,17 +126,18 @@ def fetch_asset_metadata(asset_id: str) -> Dict[str, Any]:
 
 
 def download_to_gcs(url: str, asset_id: str) -> str:
+    """Stream download directly into GCS to avoid buffering large files in memory."""
     bucket_uri = require_env("ASSETS_BUCKET")
     bucket_name = bucket_uri.replace("gs://", "")
     storage_client = get_storage_client()
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(f"raw/{asset_id}.mp4")
 
-    resp = requests.get(url, stream=True, timeout=REQUEST_TIMEOUT)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=f"Download error: {resp.text}")
+    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT) as resp:
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=f"Download error: {resp.text}")
+        blob.upload_from_file(resp.raw, rewind=True)
 
-    blob.upload_from_string(resp.content)
     return f"gs://{bucket_name}/raw/{asset_id}.mp4"
 
 
@@ -154,25 +147,7 @@ def write_stub_record(asset_id: str, getty: Dict[str, Any], gcs_path: str) -> No
         {
             "status": "processed",
             "paths": {"raw": gcs_path},
-            "getty": {
-                "id": getty.get("id"),
-                "title": getty.get("title"),
-                "caption": getty.get("caption"),
-                "keywords": getty.get("keywords", []),
-                "artist": getty.get("artist"),
-                "asset_family": getty.get("asset_family"),
-                "allowed_use": getty.get("allowed_use"),
-                "usage_restrictions": getty.get("usage_restrictions"),
-                "collection_name": getty.get("collection_name"),
-                "date_created": getty.get("date_created"),
-                "aspect_ratio": getty.get("aspect_ratio"),
-                "clip_length": getty.get("clip_length"),
-                "editorial_segments": getty.get("editorial_segments"),
-                "referral_destinations": getty.get("referral_destinations"),
-                "preview": getty.get("preview"),
-                "thumb": getty.get("thumb"),
-                "download_url": getty.get("file_download_url"),
-            },
+            "getty": getty,
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
     )
@@ -192,73 +167,46 @@ def health():
 async def validate(req: Request):
     body = await req.json()
     try:
-        count = int(body.get("count", 10))
+        count = int(body.get("count", 2))  # keep small to avoid timeout
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid 'count' value. Must be an integer.")
 
     asset_ids = search_assets(count=count)
-    results: List[Dict[str, Any]] = []
 
-    for asset_id in asset_ids:
+    async def process_asset(asset_id: str):
         if already_processed(asset_id):
-            results.append({
+            return {
                 "asset_id": asset_id,
                 "status": "skipped_duplicate",
                 "timestamp": datetime.utcnow().isoformat() + "Z",
-            })
-            continue
-
+            }
         try:
             asset = fetch_asset_metadata(asset_id)
-        except HTTPException as e:
-            results.append({
-                "asset_id": asset_id,
-                "status": "metadata_error",
-                "detail": e.detail,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-            })
-            continue
-
-        download_url = asset.get("file_download_url")
-        if not download_url:
-            results.append({
-                "asset_id": asset_id,
-                "status": "no_download_url",
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-            })
-            continue
-
-        try:
+            download_url = asset.get("file_download_url")
+            if not download_url:
+                return {
+                    "asset_id": asset_id,
+                    "status": "no_download_url",
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
             gcs_path = download_to_gcs(download_url, asset_id)
-        except HTTPException as e:
-            results.append({
-                "asset_id": asset_id,
-                "status": "download_error",
-                "detail": e.detail,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-            })
-            continue
-
-        try:
             write_stub_record(asset_id, asset, gcs_path)
-        except Exception as e:
-            logger.error(f"Firestore write failed for {asset_id}: {e}")
-            results.append({
+            return {
                 "asset_id": asset_id,
                 "paths": {"raw": gcs_path},
-                "status": "firestore_error",
+                "getty": asset,
+                "status": "fetched",
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+        except Exception as e:
+            logger.error(f"Error processing {asset_id}: {e}")
+            return {
+                "asset_id": asset_id,
+                "status": "error",
                 "detail": str(e),
                 "timestamp": datetime.utcnow().isoformat() + "Z",
-            })
-            continue
+            }
 
-        # Success case
-        results.append({
-            "asset_id": asset_id,
-            "paths": {"raw": gcs_path},
-            "getty": asset,
-            "status": "fetched",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        })
-
+    # Run asset processing concurrently
+    results = await asyncio.gather(*(process_asset(aid) for aid in asset_ids))
     return {"assets": results}
