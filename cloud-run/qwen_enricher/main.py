@@ -1,7 +1,7 @@
 import os
 import json
 from datetime import datetime
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 
 app = FastAPI()
 
@@ -20,12 +20,17 @@ def health():
     }
 
 def build_prompt(asset_json: dict) -> str:
-    """Create a deterministic prompt from prior blocks."""
+    """Create a deterministic prompt from prior blocks, works for Getty or local mode."""
+    # Getty metadata (optional)
     title = asset_json.get("getty", {}).get("title", "")
     caption = asset_json.get("getty", {}).get("caption", "")
     keywords = asset_json.get("getty", {}).get("keywords", [])
+
+    # Technical metadata
     tech = asset_json.get("technical", {})
     transcript_text = asset_json.get("transcript", {}).get("text", "")
+
+    # Frame analysis
     frames = asset_json.get("frames", {})
     objects = frames.get("objects_detected", [])
     dominant_colors = frames.get("dominant_colors", [])
@@ -68,11 +73,13 @@ def run_qwen(prompt: str) -> dict:
 @app.post("/enrich")
 async def enrich(req: Request):
     """
-    Input: unified JSON (partial) containing getty, technical, transcript, frames, paths.
+    Input: unified JSON (partial) containing technical, transcript, frames, paths.
     Output: same JSON plus 'qwen' block with summary, tags, tone.
     """
     asset_json = await req.json()
     asset_id = asset_json.get("asset_id")
+    if not asset_id:
+        raise HTTPException(status_code=400, detail="asset_id required")
 
     prompt = build_prompt(asset_json)
     qwen_out = run_qwen(prompt)
