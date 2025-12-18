@@ -36,43 +36,42 @@ def health():
 
 @app.post("/run_all")
 async def run_all(req: Request):
-    """
-    Input: {"asset_id":"getty-123456"}
-    Orchestrates the full pipeline:
-      1. Getty-enricher
-      2. Transcode
-      3. Transcribe
-      4. Sample-frames
-      5. Qwen-enricher
-      6. Store-metadata
-    Returns: unified JSON with all blocks
-    """
     data = await req.json()
-    asset_id = data.get("asset_id")
-    if not asset_id:
-        raise HTTPException(status_code=400, detail="asset_id required")
 
-    # Step 1: Getty
-    getty_json = call_service(GETTY_URL, "validate", {"asset_id": asset_id})
+    # Mode 1: Getty asset_id
+    if "asset_id" in data:
+        asset_id = data["asset_id"]
+        getty_json = call_service(GETTY_URL, "validate", {"asset_id": asset_id})
+        payload = getty_json
 
-    # Step 2: Transcode
-    transcode_json = call_service(TRANSCODE_URL, "transcode", getty_json)
+    # Mode 2: Local file_name + bucket
+    elif "file_name" in data and "bucket" in data:
+        file_name = data["file_name"]
+        bucket = data["bucket"]
+        payload = {"file_name": file_name, "bucket": bucket}
 
-    # Step 3: Transcribe
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either asset_id (Getty) OR file_name+bucket (local)"
+        )
+
+    # Step 1: Transcode
+    transcode_json = call_service(TRANSCODE_URL, "transcode", payload)
+
+    # Step 2: Transcribe
     transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", transcode_json)
 
-    # Step 4: Sample frames
+    # Step 3: Sample frames
     frames_json = call_service(FRAMES_URL, "sample", transcribe_json)
 
-    # Step 5: Qwen enrichment
+    # Step 4: Qwen enrichment
     qwen_json = call_service(QWEN_URL, "enrich", frames_json)
 
-    # Step 6: Store metadata
+    # Step 5: Store metadata
     stored_json = call_service(STORE_URL, "store", qwen_json)
 
-    # Final unified JSON
     return {
-        "asset_id": asset_id,
         "pipeline": "complete",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "result": stored_json
