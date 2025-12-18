@@ -1,15 +1,15 @@
 import os
 import subprocess
 import json
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from google.cloud import storage
 from datetime import datetime
 
 app = FastAPI()
 
 # Environment variables
-ASSETS_BUCKET = os.getenv("ASSETS_BUCKET")       # gs://df-films-assets-euw1
-TRANSCODED_BUCKET = os.getenv("TRANSCODED_BUCKET")  # gs://df-films-assets-euw1/transcoded
+ASSETS_BUCKET = os.getenv("ASSETS_BUCKET")       # e.g. gs://df-films-assets-euw1
+TRANSCODED_BUCKET = os.getenv("TRANSCODED_BUCKET")  # e.g. gs://df-films-assets-euw1/transcoded
 
 storage_client = storage.Client()
 
@@ -60,15 +60,31 @@ def health():
 async def transcode(req: Request):
     """Normalize video and return technical metadata."""
     data = await req.json()
-    asset_id = data.get("asset_id")
-    raw_path = data["paths"]["raw"]  # gs://df-films-assets-euw1/raw/getty-123456.mp4
 
-    # Local paths
-    local_in = f"/tmp/{asset_id}.mp4"
-    local_out = f"/tmp/{asset_id}_normalized.mp4"
+    # Mode 1: Getty asset_id
+    if "asset_id" in data and "paths" in data and "raw" in data["paths"]:
+        asset_id = data["asset_id"]
+        raw_path = data["paths"]["raw"]  # e.g. gs://bucket/raw/getty-123456.mp4
+        local_in = f"/tmp/{asset_id}.mp4"
+        local_out = f"/tmp/{asset_id}_normalized.mp4"
+        blob_name = f"raw/{asset_id}.mp4"
+
+    # Mode 2: Local file_name + bucket
+    elif "file_name" in data and "bucket" in data:
+        file_name = data["file_name"]  # e.g. raw/CE_025_0.mp4
+        bucket = data["bucket"]        # e.g. df-films-assets-euw1
+        asset_id = os.path.splitext(os.path.basename(file_name))[0]
+        raw_path = f"gs://{bucket}/{file_name}"
+        local_in = f"/tmp/{asset_id}.mp4"
+        local_out = f"/tmp/{asset_id}_normalized.mp4"
+        blob_name = file_name
+
+    else:
+        raise HTTPException(status_code=400,
+                            detail="Provide either asset_id+paths.raw (Getty) OR file_name+bucket (local)")
 
     # Download raw video
-    download_from_gcs(ASSETS_BUCKET, f"raw/{asset_id}.mp4", local_in)
+    download_from_gcs(ASSETS_BUCKET, blob_name, local_in)
 
     # Run FFmpeg normalization
     subprocess.run([
