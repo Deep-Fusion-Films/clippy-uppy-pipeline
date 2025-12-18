@@ -2,15 +2,15 @@ import os
 import cv2
 import json
 from typing import List, Tuple
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from google.cloud import storage
 from datetime import datetime
 
 app = FastAPI()
 
 # Environment variables
-TRANSCODED_BUCKET = os.getenv("TRANSCODED_BUCKET")  # gs://df-films-assets-euw1/transcoded
-FRAMES_BUCKET = os.getenv("FRAMES_BUCKET")          # gs://df-films-assets-euw1/frames
+TRANSCODED_BUCKET = os.getenv("TRANSCODED_BUCKET")  # e.g. gs://df-films-assets-euw1/transcoded
+FRAMES_BUCKET = os.getenv("FRAMES_BUCKET")          # e.g. gs://df-films-assets-euw1/frames
 
 storage_client = storage.Client()
 
@@ -30,12 +30,6 @@ def upload_to_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
     return f"gs://{_bucket_name(bucket_uri)}/{blob_name}"
 
 def sample_keyframes(local_video_path: str, max_frames: int = 6, stride_seconds: float = 10.0) -> List[Tuple[int, int]]:
-    """
-    Simple, robust keyframe sampler:
-    - Opens the video with OpenCV
-    - Grabs a frame approximately every stride_seconds
-    - Returns list of (frame_index, timestamp_ms)
-    """
     cap = cv2.VideoCapture(local_video_path)
     if not cap.isOpened():
         raise RuntimeError("Failed to open video for sampling")
@@ -66,7 +60,6 @@ def save_frame(local_video_path: str, frame_index: int, out_path: str) -> None:
     cap.release()
     if not ok or frame is None:
         raise RuntimeError(f"Failed to read frame at index {frame_index}")
-    # JPEG quality tuned to 90 for balance
     cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
 
 @app.get("/health")
@@ -80,32 +73,50 @@ def health():
 @app.post("/sample")
 async def sample(req: Request):
     """
-    Input JSON:
-      {
-        "asset_id": "getty-123456",
-        "paths": {
-          "transcoded": "gs://df-films-assets-euw1/transcoded/getty-123456_normalized.mp4"
-        },
-        "config": {
-          "max_frames": 6,
-          "stride_seconds": 10.0
+    Input JSON (two modes):
+      Getty:
+        {
+          "asset_id": "getty-123456",
+          "paths": {
+            "transcoded": "gs://bucket/transcoded/getty-123456_normalized.mp4"
+          },
+          "config": { "max_frames": 6, "stride_seconds": 10.0 }
         }
-      }
+      Local:
+        {
+          "file_name": "raw/CE_025_0.mp4",
+          "bucket": "df-films-assets-euw1",
+          "config": { "max_frames": 6, "stride_seconds": 10.0 }
+        }
     """
     data = await req.json()
-    asset_id = data.get("asset_id")
-    transcoded_path = data["paths"]["transcoded"]
+
+    # Mode 1: Getty asset_id + paths.transcoded
+    if "asset_id" in data and "paths" in data and "transcoded" in data["paths"]:
+        asset_id = data["asset_id"]
+        transcoded_path = data["paths"]["transcoded"]
+        transcoded_blob = f"{asset_id}_normalized.mp4"
+
+    # Mode 2: Local file_name + bucket
+    elif "file_name" in data and "bucket" in data:
+        file_name = data["file_name"]  # e.g. raw/CE_025_0.mp4
+        bucket = data["bucket"]
+        asset_id = os.path.splitext(os.path.basename(file_name))[0]
+        transcoded_path = f"gs://{bucket}/transcoded/{asset_id}_normalized.mp4"
+        transcoded_blob = f"{asset_id}_normalized.mp4"
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either asset_id+paths.transcoded (Getty) OR file_name+bucket (local)"
+        )
+
     config = data.get("config", {})
     max_frames = int(config.get("max_frames", 6))
     stride_seconds = float(config.get("stride_seconds", 10.0))
 
-    # Local paths
     local_video = f"/tmp/{asset_id}_normalized.mp4"
-
-    # Derive blob names relative to configured buckets
-    # Transcoded blob name is after bucket prefix in the provided path; we use known pattern:
-    transcoded_blob = f"{asset_id}_normalized.mp4"  # stored at TRANSCODED_BUCKET/<blob>
-    frames_prefix = f"{asset_id}/"  # namespace frames per asset
+    frames_prefix = f"{asset_id}/"
 
     # Download video
     download_from_gcs(TRANSCODED_BUCKET, transcoded_blob, local_video)
@@ -114,19 +125,14 @@ async def sample(req: Request):
     samples = sample_keyframes(local_video_path=local_video, max_frames=max_frames, stride_seconds=stride_seconds)
 
     keyframe_paths = []
-    scene_boundaries = []  # Placeholder: could be filled by scene detection later
+    scene_boundaries = []
     for i, (frame_idx, ts_ms) in enumerate(samples, start=1):
         local_frame = f"/tmp/{asset_id}_kf_{i:04}.jpg"
         save_frame(local_video, frame_idx, local_frame)
         gcs_frame_blob = f"{frames_prefix}{asset_id}_kf_{i:04}.jpg"
         gcs_frame_path = upload_to_gcs(FRAMES_BUCKET, gcs_frame_blob, local_frame)
         keyframe_paths.append(gcs_frame_path)
-        scene_boundaries.append(ts_ms)  # Using timestamps as coarse scene markers
-
-    # Simple placeholders (tie into detectors later if needed)
-    objects_detected = []
-    faces_detected = []
-    dominant_colors = []
+        scene_boundaries.append(ts_ms)
 
     return {
         "asset_id": asset_id,
@@ -137,9 +143,9 @@ async def sample(req: Request):
         "frames": {
             "scene_boundaries": scene_boundaries,
             "keyframe_paths": keyframe_paths,
-            "objects_detected": objects_detected,
-            "faces_detected": faces_detected,
-            "dominant_colors": dominant_colors
+            "objects_detected": [],
+            "faces_detected": [],
+            "dominant_colors": []
         },
         "status": "frames_sampled",
         "timestamp": datetime.utcnow().isoformat() + "Z"
