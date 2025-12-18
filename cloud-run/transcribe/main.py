@@ -1,7 +1,7 @@
 import os
 import subprocess
 import json
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from google.cloud import storage
 from datetime import datetime
 import whisper  # OpenAI Whisper model
@@ -9,9 +9,9 @@ import whisper  # OpenAI Whisper model
 app = FastAPI()
 
 # Environment variables
-TRANSCODED_BUCKET = os.getenv("TRANSCODED_BUCKET")   # gs://df-films-assets-euw1/transcoded
-AUDIO_BUCKET = os.getenv("AUDIO_BUCKET")             # gs://df-films-assets-euw1/audio
-TRANSCRIPTS_BUCKET = os.getenv("TRANSCRIPTS_BUCKET") # gs://df-films-metadata-euw1/transcripts
+TRANSCODED_BUCKET = os.getenv("TRANSCODED_BUCKET")   # e.g. gs://df-films-assets-euw1/transcoded
+AUDIO_BUCKET = os.getenv("AUDIO_BUCKET")             # e.g. gs://df-films-assets-euw1/audio
+TRANSCRIPTS_BUCKET = os.getenv("TRANSCRIPTS_BUCKET") # e.g. gs://df-films-metadata-euw1/transcripts
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 
 storage_client = storage.Client()
@@ -44,16 +44,35 @@ def health():
 @app.post("/transcribe")
 async def transcribe(req: Request):
     data = await req.json()
-    asset_id = data.get("asset_id")
-    transcoded_path = data["paths"]["transcoded"]  # gs://df-films-assets-euw1/transcoded/getty-123456_normalized.mp4
 
-    # Local paths
-    local_video = f"/tmp/{asset_id}_normalized.mp4"
+    # Mode 1: Getty asset_id + paths.transcoded
+    if "asset_id" in data and "paths" in data and "transcoded" in data["paths"]:
+        asset_id = data["asset_id"]
+        transcoded_path = data["paths"]["transcoded"]  # e.g. gs://bucket/transcoded/getty-123456_normalized.mp4
+        local_video = f"/tmp/{asset_id}_normalized.mp4"
+        blob_name = f"{asset_id}_normalized.mp4"
+
+    # Mode 2: Local file_name + bucket
+    elif "file_name" in data and "bucket" in data:
+        file_name = data["file_name"]  # e.g. raw/CE_025_0.mp4
+        bucket = data["bucket"]        # e.g. df-films-assets-euw1
+        asset_id = os.path.splitext(os.path.basename(file_name))[0]
+        transcoded_path = f"gs://{bucket}/transcoded/{asset_id}_normalized.mp4"
+        local_video = f"/tmp/{asset_id}_normalized.mp4"
+        blob_name = f"{asset_id}_normalized.mp4"
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either asset_id+paths.transcoded (Getty) OR file_name+bucket (local)"
+        )
+
+    # Local paths for audio and transcript
     local_audio = f"/tmp/{asset_id}.wav"
     local_transcript = f"/tmp/{asset_id}.json"
 
     # Download transcoded video
-    download_from_gcs(TRANSCODED_BUCKET, f"{asset_id}_normalized.mp4", local_video)
+    download_from_gcs(TRANSCODED_BUCKET, blob_name, local_video)
 
     # Extract audio with ffmpeg
     subprocess.run([
@@ -72,7 +91,7 @@ async def transcribe(req: Request):
         "text": result["text"],
         "language": result.get("language", "en"),
         "segments": result.get("segments", []),
-        "confidence": None  # Whisper doesn’t provide confidence, can be added if post-processed
+        "confidence": None  # Whisper doesn’t provide confidence
     }
 
     # Save transcript JSON to GCS
