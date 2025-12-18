@@ -2,6 +2,8 @@ import os
 import requests
 from fastapi import FastAPI, Request, HTTPException
 from datetime import datetime
+import google.auth.transport.requests
+import google.oauth2.id_token
 
 app = FastAPI()
 
@@ -14,9 +16,18 @@ QWEN_URL = os.getenv("QWEN_URL")
 STORE_URL = os.getenv("STORE_URL")
 
 def call_service(url: str, endpoint: str, payload: dict) -> dict:
+    """
+    Call a downstream Cloud Run service with ID token authentication.
+    """
     if not url:
         raise HTTPException(status_code=500, detail=f"Missing service URL for {endpoint}")
-    resp = requests.post(f"{url}/{endpoint}", json=payload)
+    request = google.auth.transport.requests.Request()
+    id_token = google.oauth2.id_token.fetch_id_token(request, url)
+    resp = requests.post(
+        f"{url}/{endpoint}",
+        json=payload,
+        headers={"Authorization": f"Bearer {id_token}"}
+    )
     resp.raise_for_status()
     return resp.json()
 
@@ -36,6 +47,12 @@ def health():
 
 @app.post("/run_all")
 async def run_all(req: Request):
+    """
+    Orchestrates the full pipeline.
+    Input:
+      Getty: {"asset_id":"getty-123456"}
+      Local: {"file_name":"raw/CE_025_0.mp4","bucket":"df-films-assets-euw1"}
+    """
     data = await req.json()
 
     # Mode 1: Getty asset_id
