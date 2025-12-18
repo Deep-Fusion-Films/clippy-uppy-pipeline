@@ -15,30 +15,31 @@ storage_client = storage.Client()
 firestore_client = firestore.Client(project=FIRESTORE_PROJECT_ID)
 
 def bucket_name_from_uri(uri: str) -> str:
-    # Accepts gs://bucket[/prefix]; returns bucket only
     return uri.replace("gs://", "").split("/")[0]
 
 def prefix_from_uri(uri: str) -> str:
-    # Returns any path after bucket, normalized without leading slash
     parts = uri.replace("gs://", "").split("/", 1)
     return parts[1] if len(parts) > 1 else ""
 
 def validate_schema(asset_json: dict) -> None:
-    required_top = ["asset_id", "paths"]
-    for k in required_top:
-        if k not in asset_json:
-            raise HTTPException(status_code=400, detail=f"Missing required key: {k}")
+    # Require asset_id always
+    if "asset_id" not in asset_json:
+        raise HTTPException(status_code=400, detail="Missing required key: asset_id")
 
-    # Minimal path requirements for traceability
-    required_paths = ["raw"]
-    missing = [p for p in required_paths if p not in asset_json["paths"]]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing required paths: {missing}")
+    # Require either paths.raw (Getty) OR file_name+bucket (local)
+    if "paths" in asset_json and "raw" in asset_json["paths"]:
+        return
+    elif "file_name" in asset_json and "bucket" in asset_json:
+        return
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required input: provide paths.raw (Getty) OR file_name+bucket (local)"
+        )
 
 def build_metadata_blob_path(asset_id: str, base_uri: str) -> str:
     bucket = bucket_name_from_uri(base_uri)
-    prefix = prefix_from_uri(base_uri)
-    prefix = prefix.rstrip("/")
+    prefix = prefix_from_uri(base_uri).rstrip("/")
     blob_path = f"{prefix}/{asset_id}.json" if prefix else f"{asset_id}.json"
     return bucket, blob_path
 
@@ -51,7 +52,6 @@ def write_json_to_gcs(asset_id: str, asset_json: dict, base_uri: str) -> str:
     return f"gs://{bucket_name}/{blob_path}"
 
 def write_json_to_firestore(asset_id: str, asset_json: dict) -> dict:
-    # Use database if provided; default is (default)
     doc_ref = firestore_client.collection("assets").document(asset_id)
     doc_ref.set(asset_json)
     return {"collection": "assets", "doc_id": asset_id}
@@ -68,9 +68,9 @@ def health():
 @app.post("/store")
 async def store(req: Request):
     """
-    Input: unified JSON (from pipeline) containing getty, technical, transcript, frames, qwen, paths.
+    Input: unified JSON (from pipeline) containing technical, transcript, frames, qwen, paths.
     Behavior:
-      - Validates minimal schema
+      - Validates schema (Getty or local mode)
       - Ensures metadata path in 'paths.metadata'
       - Writes JSON to GCS and mirrors to Firestore
       - Returns confirmation with canonical paths
