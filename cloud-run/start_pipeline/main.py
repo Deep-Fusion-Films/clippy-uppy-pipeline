@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request, HTTPException
 from datetime import datetime
 import google.auth.transport.requests
 import google.oauth2.id_token
+import copy
 
 app = FastAPI()
 
@@ -20,7 +21,6 @@ STORE_URL = os.getenv("STORE_URL")
 # AUTHENTICATED CLOUD RUN CALL
 # ---------------------------------------------------------
 def call_service(url: str, endpoint: str, payload: dict) -> dict:
-    """Call a Cloud Run service using ID token authentication."""
     if not url:
         raise HTTPException(status_code=500, detail=f"Missing service URL for {endpoint}")
 
@@ -40,62 +40,49 @@ def call_service(url: str, endpoint: str, payload: dict) -> dict:
 
 
 # ---------------------------------------------------------
-# INPUT NORMALISATION LAYER
+# DEEP MERGE UTILITY
+# ---------------------------------------------------------
+def deep_merge(a: dict, b: dict) -> dict:
+    """Recursively merge dict b into dict a."""
+    result = copy.deepcopy(a)
+    for key, value in b.items():
+        if (
+            key in result
+            and isinstance(result[key], dict)
+            and isinstance(value, dict)
+        ):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+# ---------------------------------------------------------
+# INPUT NORMALISATION
 # ---------------------------------------------------------
 def build_initial_payload(data: dict) -> dict:
-    """
-    Normalise input into a unified payload for the pipeline.
-
-    Supported input sources:
-    - Getty: {"asset_id": "getty-123456"}
-    - Local/GCS: {"file_name": "...", "bucket": "..."}
-    - Upload: {"file_name": "...", "bucket": "...", "source": "upload"}
-    - Google Drive: {"file_name": "...", "bucket": "...", "source": "drive"}
-    - Camera/Camcorder: {"file_name": "...", "bucket": "...", "source": "camera"}
-    - Other APIs: {"file_name": "...", "bucket": "...", "source": "other_api"}
-    """
-
-    # -----------------------------
-    # MODE 1: GETTY INGESTION
-    # -----------------------------
     if "asset_id" in data:
-        asset_id = data["asset_id"]
-        return call_service(GETTY_URL, "validate", {"asset_id": asset_id})
+        return call_service(GETTY_URL, "validate", {"asset_id": data["asset_id"]})
 
-    # -----------------------------
-    # MODE 2: GENERIC GCS INGESTION
-    # (upload, drive, camera, other APIs)
-    # -----------------------------
     if "file_name" in data and "bucket" in data:
         file_name = data["file_name"]
         bucket = data["bucket"]
-
-        # Default to "local" if no explicit source is provided
         source = data.get("source", "local")
-
-        # Derive asset_id from filename
         asset_id = os.path.splitext(os.path.basename(file_name))[0]
 
         return {
             "asset_id": asset_id,
             "file_name": file_name,
             "bucket": bucket,
-            "source": source,  # upload | drive | camera | other_api | local
+            "source": source,
             "paths": {
                 "raw": f"gs://{bucket}/{file_name}"
             }
         }
 
-    # -----------------------------
-    # INVALID INPUT
-    # -----------------------------
     raise HTTPException(
         status_code=400,
-        detail=(
-            "Invalid input. Provide either:\n"
-            "- asset_id (Getty mode), OR\n"
-            "- file_name + bucket (local/upload/drive/camera/other_api)"
-        )
+        detail="Invalid input: provide asset_id OR file_name + bucket"
     )
 
 
@@ -122,26 +109,29 @@ def health():
 # ---------------------------------------------------------
 @app.post("/run_all")
 async def run_all(req: Request):
-    """Full pipeline orchestration."""
     data = await req.json()
 
-    # Step 0: Normalise input
+    # Step 0: Normalize input
     payload = build_initial_payload(data)
 
     # Step 1: Transcode
     transcode_json = call_service(TRANSCODE_URL, "transcode", payload)
+    merged = deep_merge(payload, transcode_json)
 
     # Step 2: Transcribe
-    transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", transcode_json)
+    transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", merged)
+    merged = deep_merge(merged, transcribe_json)
 
     # Step 3: Sample frames
-    frames_json = call_service(FRAMES_URL, "sample", transcribe_json)
+    frames_json = call_service(FRAMES_URL, "sample", merged)
+    merged = deep_merge(merged, frames_json)
 
-    # Step 4: Qwen enrichment
-    qwen_json = call_service(QWEN_URL, "enrich", frames_json)
+    # Step 4: Qwen enrichment (send full merged payload)
+    qwen_json = call_service(QWEN_URL, "enrich", merged)
+    merged["qwen"] = qwen_json
 
-    # Step 5: Store metadata
-    stored_json = call_service(STORE_URL, "store", qwen_json)
+    # Step 5: Store metadata (send full merged payload)
+    stored_json = call_service(STORE_URL, "store", merged)
 
     return {
         "pipeline": "complete",
