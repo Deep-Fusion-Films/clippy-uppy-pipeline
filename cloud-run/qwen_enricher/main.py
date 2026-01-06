@@ -125,6 +125,7 @@ def run_groq(prompt: str) -> dict:
         ],
         "max_tokens": MAX_TOKENS,
         "temperature": TEMPERATURE
+        "response_format": {"type": "json_object"}
     }
 
     resp = requests.post(GROQ_API_URL, json=payload, headers=headers)
