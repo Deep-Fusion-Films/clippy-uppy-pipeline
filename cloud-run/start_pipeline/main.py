@@ -7,7 +7,7 @@ import google.oauth2.id_token
 
 app = FastAPI()
 
-# Environment variables: service URLs
+# Downstream service URLs
 GETTY_URL = os.getenv("GETTY_URL")
 TRANSCODE_URL = os.getenv("TRANSCODE_URL")
 TRANSCRIBE_URL = os.getenv("TRANSCRIBE_URL")
@@ -15,22 +15,93 @@ FRAMES_URL = os.getenv("FRAMES_URL")
 QWEN_URL = os.getenv("QWEN_URL")
 STORE_URL = os.getenv("STORE_URL")
 
+
+# ---------------------------------------------------------
+# AUTHENTICATED CLOUD RUN CALL
+# ---------------------------------------------------------
 def call_service(url: str, endpoint: str, payload: dict) -> dict:
-    """
-    Call a downstream Cloud Run service with ID token authentication.
-    """
+    """Call a Cloud Run service using ID token authentication."""
     if not url:
         raise HTTPException(status_code=500, detail=f"Missing service URL for {endpoint}")
-    request = google.auth.transport.requests.Request()
-    id_token = google.oauth2.id_token.fetch_id_token(request, url)
+
+    auth_req = google.auth.transport.requests.Request()
+    token = google.oauth2.id_token.fetch_id_token(auth_req, url)
+
     resp = requests.post(
         f"{url}/{endpoint}",
         json=payload,
-        headers={"Authorization": f"Bearer {id_token}"}
+        headers={"Authorization": f"Bearer {token}"}
     )
-    resp.raise_for_status()
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
     return resp.json()
 
+
+# ---------------------------------------------------------
+# INPUT NORMALISATION LAYER
+# ---------------------------------------------------------
+def build_initial_payload(data: dict) -> dict:
+    """
+    Normalise input into a unified payload for the pipeline.
+
+    Supported input sources:
+    - Getty: {"asset_id": "getty-123456"}
+    - Local/GCS: {"file_name": "...", "bucket": "..."}
+    - Upload: {"file_name": "...", "bucket": "...", "source": "upload"}
+    - Google Drive: {"file_name": "...", "bucket": "...", "source": "drive"}
+    - Camera/Camcorder: {"file_name": "...", "bucket": "...", "source": "camera"}
+    - Other APIs: {"file_name": "...", "bucket": "...", "source": "other_api"}
+    """
+
+    # -----------------------------
+    # MODE 1: GETTY INGESTION
+    # -----------------------------
+    if "asset_id" in data:
+        asset_id = data["asset_id"]
+        return call_service(GETTY_URL, "validate", {"asset_id": asset_id})
+
+    # -----------------------------
+    # MODE 2: GENERIC GCS INGESTION
+    # (upload, drive, camera, other APIs)
+    # -----------------------------
+    if "file_name" in data and "bucket" in data:
+        file_name = data["file_name"]
+        bucket = data["bucket"]
+
+        # Default to "local" if no explicit source is provided
+        source = data.get("source", "local")
+
+        # Derive asset_id from filename
+        asset_id = os.path.splitext(os.path.basename(file_name))[0]
+
+        return {
+            "asset_id": asset_id,
+            "file_name": file_name,
+            "bucket": bucket,
+            "source": source,  # upload | drive | camera | other_api | local
+            "paths": {
+                "raw": f"gs://{bucket}/{file_name}"
+            }
+        }
+
+    # -----------------------------
+    # INVALID INPUT
+    # -----------------------------
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Invalid input. Provide either:\n"
+            "- asset_id (Getty mode), OR\n"
+            "- file_name + bucket (local/upload/drive/camera/other_api)"
+        )
+    )
+
+
+# ---------------------------------------------------------
+# HEALTH CHECK
+# ---------------------------------------------------------
 @app.get("/health")
 def health():
     return {
@@ -45,33 +116,17 @@ def health():
         }
     }
 
+
+# ---------------------------------------------------------
+# FULL PIPELINE ORCHESTRATION
+# ---------------------------------------------------------
 @app.post("/run_all")
 async def run_all(req: Request):
-    """
-    Orchestrates the full pipeline.
-    Input:
-      Getty: {"asset_id":"getty-123456"}
-      Local: {"file_name":"raw/CE_025_0.mp4","bucket":"df-films-assets-euw1"}
-    """
+    """Full pipeline orchestration."""
     data = await req.json()
 
-    # Mode 1: Getty asset_id
-    if "asset_id" in data:
-        asset_id = data["asset_id"]
-        getty_json = call_service(GETTY_URL, "validate", {"asset_id": asset_id})
-        payload = getty_json
-
-    # Mode 2: Local file_name + bucket
-    elif "file_name" in data and "bucket" in data:
-        file_name = data["file_name"]
-        bucket = data["bucket"]
-        payload = {"file_name": file_name, "bucket": bucket}
-
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Provide either asset_id (Getty) OR file_name+bucket (local)"
-        )
+    # Step 0: Normalise input
+    payload = build_initial_payload(data)
 
     # Step 1: Transcode
     transcode_json = call_service(TRANSCODE_URL, "transcode", payload)
