@@ -64,15 +64,15 @@ async def transcode(req: Request):
     # Mode 1: Getty asset_id
     if "asset_id" in data and "paths" in data and "raw" in data["paths"]:
         asset_id = data["asset_id"]
-        raw_path = data["paths"]["raw"]  # e.g. gs://bucket/raw/getty-123456.mp4
+        raw_path = data["paths"]["raw"]
         local_in = f"/tmp/{asset_id}.mp4"
         local_out = f"/tmp/{asset_id}_normalized.mp4"
         blob_name = f"raw/{asset_id}.mp4"
 
     # Mode 2: Local file_name + bucket
     elif "file_name" in data and "bucket" in data:
-        file_name = data["file_name"]  # e.g. raw/CE_025_0.mp4
-        bucket = data["bucket"]        # e.g. df-films-assets-euw1
+        file_name = data["file_name"]
+        bucket = data["bucket"]
         asset_id = os.path.splitext(os.path.basename(file_name))[0]
         raw_path = f"gs://{bucket}/{file_name}"
         local_in = f"/tmp/{asset_id}.mp4"
@@ -86,12 +86,20 @@ async def transcode(req: Request):
     # Download raw video
     download_from_gcs(ASSETS_BUCKET, blob_name, local_in)
 
-    # Run FFmpeg normalization
-    subprocess.run([
-        "ffmpeg", "-y", "-i", local_in,
-        "-c:v", "libx264", "-preset", "fast", "-c:a", "aac",
-        local_out
-    ], check=True)
+    # -------------------------------
+    # CLOUD RUN SAFE FFMPEG COMMAND
+    # -------------------------------
+    # libx264 and AAC are NOT available in Cloud Run's ffmpeg build.
+    # mpeg4 + libmp3lame are universally supported.
+    try:
+        subprocess.run([
+            "ffmpeg", "-y", "-i", local_in,
+            "-c:v", "mpeg4", "-qscale:v", "2",
+            "-c:a", "libmp3lame", "-qscale:a", "2",
+            local_out
+        ], check=True)
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"FFmpeg failed: {e.stderr}")
 
     # Upload transcoded video
     gcs_out = upload_to_gcs(TRANSCODED_BUCKET, f"{asset_id}_normalized.mp4", local_out)
