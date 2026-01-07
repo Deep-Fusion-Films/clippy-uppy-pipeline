@@ -2,22 +2,23 @@ import os
 import json
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
-import requests
+from google import genai
 
 app = FastAPI()
 
 # -------------------------------------------------------------------
-# Environment variables (Groq)
+# Environment variables (Gemini Flash)
 # -------------------------------------------------------------------
-GROQ_API_URL = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1/chat/completions")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
+VERTEX_API_KEY = os.getenv("VERTEX_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
 
-if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY must be set")
+if not VERTEX_API_KEY:
+    raise RuntimeError("VERTEX_API_KEY must be set")
+
+client = genai.Client(api_key=VERTEX_API_KEY)
 
 
 # -------------------------------------------------------------------
@@ -27,120 +28,117 @@ if not GROQ_API_KEY:
 def health():
     return {
         "status": "ok",
-        "model": GROQ_MODEL,
+        "model": GEMINI_MODEL,
         "max_tokens": MAX_TOKENS,
         "temperature": TEMPERATURE
     }
 
 
 # -------------------------------------------------------------------
-# Prompt builder (MAXIMUM METADATA VERSION)
+# Prompt builder (Documentary Image Analysis)
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict) -> str:
-    """Build a rich editorial prompt using all available metadata."""
+    """
+    Build the documentary‑grade image/video analysis prompt.
+    """
 
-    # Getty metadata (optional)
-    title = asset_json.get("getty", {}).get("title", "")
-    caption = asset_json.get("getty", {}).get("caption", "")
-    keywords = asset_json.get("getty", {}).get("keywords", [])
+    return f"""
+You are an image/video analyst for a factual documentary. Your task is to produce highly discriminative, non-generic analyses that can reliably distinguish between hundreds of visually similar images. Base all conclusions strictly on visible evidence and supplied metadata. Do not invent facts.
 
-    # Technical metadata
-    tech = asset_json.get("technical", {})
-    codec = tech.get("codec")
-    resolution = tech.get("resolution")
-    duration = tech.get("duration")
-    bitrate = tech.get("bitrate")
-    frame_rate = tech.get("frame_rate")
+Return ONLY valid JSON matching the schema below:
 
-    # Transcript
-    transcript_text = asset_json.get("transcript", {}).get("text", "")
-    transcript_excerpt = transcript_text[:1000] if transcript_text else ""
+{{
+  "description_long": string,
+  "entities": {{
+    "people": [
+      {{
+        "name": string|null,
+        "role": string|null,
+        "clothing": string[],
+        "age_range": string|null,
+        "facial_expression": string|null,
+        "pose": string|null
+      }}
+    ],
+    "places": [
+      {{
+        "name": string|null,
+        "sublocation": string|null,
+        "indoor_outdoor": "indoor"|"outdoor"|null
+      }}
+    ],
+    "orgs": [
+      {{
+        "name": string,
+        "evidence": string|null
+      }}
+    ]
+  }},
+  "time": {{
+    "year": number|null,
+    "month": number|null,
+    "day": number|null,
+    "confidence": number,
+    "hint_text": string|null
+  }},
+  "objects": [
+    {{ "label": string, "salience": number }}
+  ],
+  "activities": [
+    {{ "label": string, "confidence": number, "who": string|null }}
+  ],
+  "themes": [ string ],
+  "composition": {{
+    "camera_angle": string|null,
+    "focal_length_est": string|null,
+    "depth_of_field": string|null,
+    "lighting": string|null,
+    "color_palette": string|null,
+    "contrast_style": string|null,
+    "orientation": string|null
+  }},
+  "text_in_image": [ string ],
+  "distinguishing_features": [ string ],
+  "story_use": [ "opener" | "bridge" | "chapter_art" | "context" | "climax" | "reveal" ],
+  "safety": {{ "sensitive": boolean, "notes": string|null }}
+}}
 
-    # Frames
-    frames = asset_json.get("frames", {})
-    objects = frames.get("objects_detected", [])
-    faces = frames.get("faces_detected", [])
-    dominant_colors = frames.get("dominant_colors", [])
-    scene_boundaries = frames.get("scene_boundaries", [])
+Guidelines:
+- "description_long" must be 2–4 sentences focusing on unique, concrete, differentiating details.
+- Use null or empty arrays when uncertain; reduce confidence accordingly.
+- Do not infer identities, locations, or organizations without visible evidence.
+- Prefer micro-details (lighting direction, clothing textures, object wear, spatial relationships) over generic descriptors.
+- Output must be a single JSON object with no commentary, no markdown, and no surrounding text.
 
-    prompt = f"""
-You are an editorial enrichment assistant. Use ALL provided metadata to produce a factual, grounded, non-sensational enrichment.
+Now analyze the provided image metadata and produce the JSON response.
 
-### Getty Metadata
-Title: {title}
-Caption: {caption}
-Keywords: {", ".join(keywords)}
-
-### Technical Metadata
-Codec: {codec}
-Resolution: {resolution}
-Duration: {duration}
-Bitrate: {bitrate}
-Frame rate: {frame_rate}
-
-### Transcript (excerpt)
-{transcript_excerpt}
-
-### Frame Analysis
-Objects detected: {", ".join(objects)}
-Faces detected: {faces}
-Dominant colors: {", ".join(dominant_colors)}
-Scene boundaries (frame indices): {scene_boundaries}
-
-### Task
-Return ONLY valid JSON with the following fields:
-
-- "summary": A 3–4 sentence editorial summary describing the content, context, and visual narrative.
-- "tags": 12–18 concise tags (lowercase, hyphenated if multiword).
-- "tone": A single descriptive word (e.g., "informative", "documentary", "cinematic").
-- "entities": list of named entities inferred from transcript or visuals (people, places, objects).
-- "themes": list of thematic concepts (e.g., "rural life", "travel", "nature", "solitude").
-- "visual_style": description of the visual style inferred from frames (e.g., "wide-shot", "color-rich", "natural light").
-- "audio_style": description of the audio tone inferred from transcript (e.g., "calm narration", "ambient sound").
-- "scene_summary": 1–2 sentence summary of what happens in the key scene(s).
-- "confidence": a numeric confidence score (0–1) for the enrichment.
-
-Return ONLY JSON. No commentary, no markdown.
-"""
-
-    return prompt.strip()
+### Provided Metadata
+{json.dumps(asset_json, indent=2)}
+""".strip()
 
 
 # -------------------------------------------------------------------
-# Groq inference
+# Gemini Flash inference
 # -------------------------------------------------------------------
-def run_groq(prompt: str) -> dict:
-    """Call Groq's OpenAI-compatible API and return parsed JSON."""
+def run_gemini(prompt: str) -> dict:
+    """Call Gemini Flash and return parsed JSON."""
 
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        generation_config={
+            "temperature": TEMPERATURE,
+            "max_output_tokens": MAX_TOKENS,
+            "response_mime_type": "application/json"
+        }
+    )
 
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are an editorial enrichment assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": MAX_TOKENS,
-        "temperature": TEMPERATURE,
-        "response_format": {"type": "json_object"}
-    }
-
-    resp = requests.post(GROQ_API_URL, json=payload, headers=headers)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
-
-    content = resp.json()["choices"][0]["message"]["content"]
-
-    # Parse JSON returned by the model
     try:
-        return json.loads(content)
+        return json.loads(response.text)
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=500,
-            detail=f"Model returned invalid JSON: {content}"
+            detail=f"Model returned invalid JSON: {response.text}"
         )
 
 
@@ -155,15 +153,10 @@ async def enrich(req: Request):
     if not asset_id:
         raise HTTPException(status_code=400, detail="asset_id required")
 
-    # Build prompt from full metadata
     prompt = build_prompt(asset_json)
+    enriched = run_gemini(prompt)
 
-    # Run Groq model
-    enriched = run_groq(prompt)
-
-    # Attach enrichment
-    asset_json["qwen"] = enriched  # keep same field name for pipeline compatibility
-
+    asset_json["analysis"] = enriched
     asset_json["status"] = "enriched"
     asset_json["timestamp"] = datetime.utcnow().isoformat() + "Z"
 
