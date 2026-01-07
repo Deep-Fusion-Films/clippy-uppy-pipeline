@@ -7,7 +7,7 @@ from google import genai
 app = FastAPI()
 
 # -------------------------------------------------------------------
-# Environment variables (Gemini Flash)
+# Environment variables
 # -------------------------------------------------------------------
 VERTEX_API_KEY = os.getenv("VERTEX_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
@@ -35,12 +35,12 @@ def health():
 
 
 # -------------------------------------------------------------------
-# Schema block (verbatim, safe in a plain string)
+# Schema block (safe literal string)
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """
 Schema (types):
 {
-  "description_long": string,                       // 2–4 sentences; unique details that distinguish this image
+  "description_long": string,
   "entities": {
     "people": [
       { "name": string|null, "role": string|null, "clothing": string[], "age_range": string|null, "facial_expression": string|null, "pose": string|null }
@@ -57,13 +57,13 @@ Schema (types):
   "activities": [ { "label": string, "confidence": number, "who": string|null } ],
   "themes": [ string ],
   "composition": {
-    "camera_angle": string|null,                   // e.g., high/low/eye-level, over-shoulder
-    "focal_length_est": string|null,               // e.g., wide/normal/telephoto look
-    "depth_of_field": string|null,                 // shallow/deep/moderate
-    "lighting": string|null,                       // direction, quality, time-of-day cues
-    "color_palette": string|null,                  // dominant hues; warm/cool; saturation
-    "contrast_style": string|null,                 // low/medium/high; soft/hard shadows
-    "orientation": string|null                     // landscape/portrait/square
+    "camera_angle": string|null,
+    "focal_length_est": string|null,
+    "depth_of_field": string|null,
+    "lighting": string|null,
+    "color_palette": string|null,
+    "contrast_style": string|null,
+    "orientation": string|null
   },
   "text_in_image": [ string ],
   "distinguishing_features": [ string ],
@@ -74,11 +74,11 @@ Schema (types):
 
 
 # -------------------------------------------------------------------
-# Prompt builder (no f-string over the schema itself)
+# Prompt builder
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict) -> str:
     template = """
-You are an image analyst for a factual documentary. Produce nuanced, discriminative analyses that can distinguish between hundreds of near-identical images.
+You are an image/video analyst for a factual documentary. Produce nuanced, discriminative analyses that can distinguish between hundreds of near-identical images.
 
 Output STRICT JSON only, matching the schema below. Prefer concrete details (composition, lighting, micro-differences) over generic tags.
 
@@ -99,62 +99,54 @@ Rules:
 
 
 # -------------------------------------------------------------------
-# Gemini Flash inference (robust response handling)
+# Extract text safely from google‑genai response
 # -------------------------------------------------------------------
-def extract_text_from_response(response) -> str:
-    """
-    Try to pull the model's text output from google-genai response
-    in a few robust ways, so we don't crash on attribute differences.
-    """
-    # Newer google-genai often exposes .text directly
+def extract_text(response) -> str:
+    # Preferred: response.text
     if hasattr(response, "text") and isinstance(response.text, str):
         return response.text
 
-    # Fallback: look for candidates[0].content.parts[0].text
+    # Fallback: candidates[0].content.parts[0].text
     try:
         candidates = getattr(response, "candidates", None)
         if candidates:
-            first = candidates[0]
-            content = getattr(first, "content", None)
-            if content and hasattr(content, "parts") and content.parts:
-                part = content.parts[0]
-                if hasattr(part, "text"):
-                    return part.text
+            parts = candidates[0].content.parts
+            if parts and hasattr(parts[0], "text"):
+                return parts[0].text
     except Exception:
         pass
 
-    # Last resort: try to serialize response to JSON and hope there's a "text" field
+    # Last resort: try JSON
     try:
-        as_dict = json.loads(response.to_json())
-        if isinstance(as_dict, dict):
-            if "text" in as_dict and isinstance(as_dict["text"], str):
-                return as_dict["text"]
+        data = json.loads(response.to_json())
+        if isinstance(data, dict) and "text" in data:
+            return data["text"]
     except Exception:
         pass
 
     raise HTTPException(
         status_code=500,
-        detail="Model response did not contain any text output."
+        detail="Model response did not contain text output."
     )
 
 
+# -------------------------------------------------------------------
+# Gemini Flash inference (correct API signature)
+# -------------------------------------------------------------------
 def run_gemini(prompt: str) -> dict:
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
-        generation_config={
-            "temperature": TEMPERATURE,
-            "max_output_tokens": MAX_TOKENS,
-            "response_mime_type": "application/json"
-        }
+        temperature=TEMPERATURE,
+        max_output_tokens=MAX_TOKENS,
+        response_mime_type="application/json"
     )
 
-    text = extract_text_from_response(response)
+    text = extract_text(response)
 
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Surface the raw text so you can see what's going on in logs
         raise HTTPException(
             status_code=500,
             detail=f"Model returned invalid JSON: {text}"
