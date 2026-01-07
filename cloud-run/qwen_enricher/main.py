@@ -124,7 +124,7 @@ def run_groq(prompt: str) -> dict:
             {"role": "user", "content": prompt}
         ],
         "max_tokens": MAX_TOKENS,
-        "temperature": TEMPERATURE
+        "temperature": TEMPERATURE,
         "response_format": {"type": "json_object"}
     }
 
