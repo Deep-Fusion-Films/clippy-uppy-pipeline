@@ -35,60 +35,27 @@ def health():
 
 
 # -------------------------------------------------------------------
-# Prompt builder (Documentary Image Analysis)
+# Schema block (verbatim, safe for Python)
 # -------------------------------------------------------------------
-def build_prompt(asset_json: dict) -> str:
-    """
-    Build the documentary‑grade image/video analysis prompt.
-    """
-
-    return f"""
-You are an image/video analyst for a factual documentary. Your task is to produce highly discriminative, non-generic analyses that can reliably distinguish between hundreds of visually similar images. Base all conclusions strictly on visible evidence and supplied metadata. Do not invent facts.
-
-Return ONLY valid JSON matching the schema below:
-
-{{
+SCHEMA_BLOCK = """
+{
   "description_long": string,
-  "entities": {{
+  "entities": {
     "people": [
-      {{
-        "name": string|null,
-        "role": string|null,
-        "clothing": string[],
-        "age_range": string|null,
-        "facial_expression": string|null,
-        "pose": string|null
-      }}
+      { "name": string|null, "role": string|null, "clothing": string[], "age_range": string|null, "facial_expression": string|null, "pose": string|null }
     ],
     "places": [
-      {{
-        "name": string|null,
-        "sublocation": string|null,
-        "indoor_outdoor": "indoor"|"outdoor"|null
-      }}
+      { "name": string|null, "sublocation": string|null, "indoor_outdoor": "indoor"|"outdoor"|null }
     ],
     "orgs": [
-      {{
-        "name": string,
-        "evidence": string|null
-      }}
+      { "name": string, "evidence": string|null }
     ]
-  }},
-  "time": {{
-    "year": number|null,
-    "month": number|null,
-    "day": number|null,
-    "confidence": number,
-    "hint_text": string|null
-  }},
-  "objects": [
-    {{ "label": string, "salience": number }}
-  ],
-  "activities": [
-    {{ "label": string, "confidence": number, "who": string|null }}
-  ],
+  },
+  "time": { "year": number|null, "month": number|null, "day": number|null, "confidence": number, "hint_text": string|null },
+  "objects": [ { "label": string, "salience": number } ],
+  "activities": [ { "label": string, "confidence": number, "who": string|null } ],
   "themes": [ string ],
-  "composition": {{
+  "composition": {
     "camera_angle": string|null,
     "focal_length_est": string|null,
     "depth_of_field": string|null,
@@ -96,21 +63,31 @@ Return ONLY valid JSON matching the schema below:
     "color_palette": string|null,
     "contrast_style": string|null,
     "orientation": string|null
-  }},
+  },
   "text_in_image": [ string ],
   "distinguishing_features": [ string ],
   "story_use": [ "opener" | "bridge" | "chapter_art" | "context" | "climax" | "reveal" ],
-  "safety": {{ "sensitive": boolean, "notes": string|null }}
-}}
+  "safety": { "sensitive": boolean, "notes": string|null }
+}
+"""
 
-Guidelines:
-- "description_long" must be 2–4 sentences focusing on unique, concrete, differentiating details.
-- Use null or empty arrays when uncertain; reduce confidence accordingly.
-- Do not infer identities, locations, or organizations without visible evidence.
-- Prefer micro-details (lighting direction, clothing textures, object wear, spatial relationships) over generic descriptors.
-- Output must be a single JSON object with no commentary, no markdown, and no surrounding text.
 
-Now analyze the provided image metadata and produce the JSON response.
+# -------------------------------------------------------------------
+# Prompt builder
+# -------------------------------------------------------------------
+def build_prompt(asset_json: dict) -> str:
+    return f"""
+You are an image analyst for a factual documentary. Produce nuanced, discriminative analyses that can distinguish between hundreds of near-identical images.
+
+Output STRICT JSON only, matching the schema below. Prefer concrete details (composition, lighting, micro-differences) over generic tags.
+
+Schema (types):
+{SCHEMA_BLOCK}
+
+Rules:
+- Use only what is visible plus supplied tags; do not invent facts.
+- If uncertain, use null/[] and reduce confidence.
+- Keep output as a single JSON object with the exact keys above.
 
 ### Provided Metadata
 {json.dumps(asset_json, indent=2)}
@@ -121,8 +98,6 @@ Now analyze the provided image metadata and produce the JSON response.
 # Gemini Flash inference
 # -------------------------------------------------------------------
 def run_gemini(prompt: str) -> dict:
-    """Call Gemini Flash and return parsed JSON."""
-
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
@@ -135,7 +110,7 @@ def run_gemini(prompt: str) -> dict:
 
     try:
         return json.loads(response.text)
-    except json.JSONDecodeError:
+    except Exception:
         raise HTTPException(
             status_code=500,
             detail=f"Model returned invalid JSON: {response.text}"
