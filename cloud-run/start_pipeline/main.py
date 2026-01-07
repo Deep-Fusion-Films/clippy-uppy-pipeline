@@ -18,6 +18,20 @@ STORE_URL = os.getenv("STORE_URL")
 
 
 # ---------------------------------------------------------
+# ASSET TYPE DETECTION
+# ---------------------------------------------------------
+def detect_asset_type(file_name: str) -> str:
+    ext = os.path.splitext(file_name.lower())[1]
+    if ext in [".mp4", ".mov", ".mkv", ".avi"]:
+        return "video"
+    if ext in [".jpg", ".jpeg", ".png", ".webp", ".tiff"]:
+        return "image"
+    if ext in [".mp3", ".wav", ".aac"]:
+        return "audio"
+    return "unknown"
+
+
+# ---------------------------------------------------------
 # AUTHENTICATED CLOUD RUN CALL
 # ---------------------------------------------------------
 def call_service(url: str, endpoint: str, payload: dict) -> dict:
@@ -70,11 +84,14 @@ def build_initial_payload(data: dict) -> dict:
         source = data.get("source", "local")
         asset_id = os.path.splitext(os.path.basename(file_name))[0]
 
+        asset_type = detect_asset_type(file_name)
+
         return {
             "asset_id": asset_id,
             "file_name": file_name,
             "bucket": bucket,
             "source": source,
+            "asset_type": asset_type,
             "paths": {
                 "raw": f"gs://{bucket}/{file_name}"
             }
@@ -113,24 +130,30 @@ async def run_all(req: Request):
 
     # Step 0: Normalize input
     payload = build_initial_payload(data)
+    asset_type = payload.get("asset_type")
 
-    # Step 1: Transcode
-    transcode_json = call_service(TRANSCODE_URL, "transcode", payload)
-    merged = deep_merge(payload, transcode_json)
+    merged = payload
 
-    # Step 2: Transcribe
-    transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", merged)
-    merged = deep_merge(merged, transcribe_json)
+    # Step 1: Transcode (video only)
+    if asset_type == "video":
+        transcode_json = call_service(TRANSCODE_URL, "transcode", merged)
+        merged = deep_merge(merged, transcode_json)
 
-    # Step 3: Sample frames
-    frames_json = call_service(FRAMES_URL, "sample", merged)
-    merged = deep_merge(merged, frames_json)
+    # Step 2: Transcribe (video or audio)
+    if asset_type in ["video", "audio"]:
+        transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", merged)
+        merged = deep_merge(merged, transcribe_json)
 
-    # Step 4: Qwen enrichment (send full merged payload)
+    # Step 3: Sample frames (video only)
+    if asset_type == "video":
+        frames_json = call_service(FRAMES_URL, "sample", merged)
+        merged = deep_merge(merged, frames_json)
+
+    # Step 4: Qwen enrichment (always runs)
     qwen_json = call_service(QWEN_URL, "enrich", merged)
     merged["qwen"] = qwen_json
 
-    # Step 5: Store metadata (send full merged payload)
+    # Step 5: Store metadata (always runs)
     stored_json = call_service(STORE_URL, "store", merged)
 
     return {
