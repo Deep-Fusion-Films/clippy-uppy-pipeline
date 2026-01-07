@@ -35,11 +35,12 @@ def health():
 
 
 # -------------------------------------------------------------------
-# Schema block (verbatim, safe for Python)
+# Schema block (verbatim, safe — NOT inside an f-string)
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """
+Schema (types):
 {
-  "description_long": string,
+  "description_long": string,                       // 2–4 sentences; unique details that distinguish this image
   "entities": {
     "people": [
       { "name": string|null, "role": string|null, "clothing": string[], "age_range": string|null, "facial_expression": string|null, "pose": string|null }
@@ -56,13 +57,13 @@ SCHEMA_BLOCK = """
   "activities": [ { "label": string, "confidence": number, "who": string|null } ],
   "themes": [ string ],
   "composition": {
-    "camera_angle": string|null,
-    "focal_length_est": string|null,
-    "depth_of_field": string|null,
-    "lighting": string|null,
-    "color_palette": string|null,
-    "contrast_style": string|null,
-    "orientation": string|null
+    "camera_angle": string|null,                   // e.g., high/low/eye-level, over-shoulder
+    "focal_length_est": string|null,               // e.g., wide/normal/telephoto look
+    "depth_of_field": string|null,                 // shallow/deep/moderate
+    "lighting": string|null,                       // direction, quality, time-of-day cues
+    "color_palette": string|null,                  // dominant hues; warm/cool; saturation
+    "contrast_style": string|null,                 // low/medium/high; soft/hard shadows
+    "orientation": string|null                     // landscape/portrait/square
   },
   "text_in_image": [ string ],
   "distinguishing_features": [ string ],
@@ -73,16 +74,16 @@ SCHEMA_BLOCK = """
 
 
 # -------------------------------------------------------------------
-# Prompt builder
+# Prompt builder (NO f-string braces inside schema)
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict) -> str:
-    return f"""
-You are an image analyst for a factual documentary. Produce nuanced, discriminative analyses that can distinguish between hundreds of near-identical images.
+    # Use .format() to safely insert schema + metadata
+    template = """
+You are an image/video analyst for a factual documentary. Produce nuanced, discriminative analyses that can distinguish between hundreds of near-identical images.
 
 Output STRICT JSON only, matching the schema below. Prefer concrete details (composition, lighting, micro-differences) over generic tags.
 
-Schema (types):
-{SCHEMA_BLOCK}
+{schema}
 
 Rules:
 - Use only what is visible plus supplied tags; do not invent facts.
@@ -90,8 +91,12 @@ Rules:
 - Keep output as a single JSON object with the exact keys above.
 
 ### Provided Metadata
-{json.dumps(asset_json, indent=2)}
-""".strip()
+{metadata}
+"""
+    return template.format(
+        schema=SCHEMA_BLOCK,
+        metadata=json.dumps(asset_json, indent=2)
+    ).strip()
 
 
 # -------------------------------------------------------------------
