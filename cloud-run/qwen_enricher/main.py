@@ -136,10 +136,7 @@ def extract_text(response) -> str:
 def run_gemini(prompt: str) -> dict:
     response = client.models.generate_content(
         model=GEMINI_MODEL,
-        contents=prompt,
-        temperature=TEMPERATURE,
-        max_output_tokens=MAX_TOKENS,
-        response_mime_type="application/json"
+        contents=prompt
     )
 
     text = extract_text(response)
