@@ -35,7 +35,7 @@ def health():
 
 
 # -------------------------------------------------------------------
-# Schema block (verbatim, safe — NOT inside an f-string)
+# Schema block (verbatim, safe in a plain string)
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """
 Schema (types):
@@ -74,12 +74,11 @@ Schema (types):
 
 
 # -------------------------------------------------------------------
-# Prompt builder (NO f-string braces inside schema)
+# Prompt builder (no f-string over the schema itself)
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict) -> str:
-    # Use .format() to safely insert schema + metadata
     template = """
-You are an image/video analyst for a factual documentary. Produce nuanced, discriminative analyses that can distinguish between hundreds of near-identical images.
+You are an image analyst for a factual documentary. Produce nuanced, discriminative analyses that can distinguish between hundreds of near-identical images.
 
 Output STRICT JSON only, matching the schema below. Prefer concrete details (composition, lighting, micro-differences) over generic tags.
 
@@ -100,8 +99,45 @@ Rules:
 
 
 # -------------------------------------------------------------------
-# Gemini Flash inference
+# Gemini Flash inference (robust response handling)
 # -------------------------------------------------------------------
+def extract_text_from_response(response) -> str:
+    """
+    Try to pull the model's text output from google-genai response
+    in a few robust ways, so we don't crash on attribute differences.
+    """
+    # Newer google-genai often exposes .text directly
+    if hasattr(response, "text") and isinstance(response.text, str):
+        return response.text
+
+    # Fallback: look for candidates[0].content.parts[0].text
+    try:
+        candidates = getattr(response, "candidates", None)
+        if candidates:
+            first = candidates[0]
+            content = getattr(first, "content", None)
+            if content and hasattr(content, "parts") and content.parts:
+                part = content.parts[0]
+                if hasattr(part, "text"):
+                    return part.text
+    except Exception:
+        pass
+
+    # Last resort: try to serialize response to JSON and hope there's a "text" field
+    try:
+        as_dict = json.loads(response.to_json())
+        if isinstance(as_dict, dict):
+            if "text" in as_dict and isinstance(as_dict["text"], str):
+                return as_dict["text"]
+    except Exception:
+        pass
+
+    raise HTTPException(
+        status_code=500,
+        detail="Model response did not contain any text output."
+    )
+
+
 def run_gemini(prompt: str) -> dict:
     response = client.models.generate_content(
         model=GEMINI_MODEL,
@@ -113,12 +149,15 @@ def run_gemini(prompt: str) -> dict:
         }
     )
 
+    text = extract_text_from_response(response)
+
     try:
-        return json.loads(response.text)
-    except Exception:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Surface the raw text so you can see what's going on in logs
         raise HTTPException(
             status_code=500,
-            detail=f"Model returned invalid JSON: {response.text}"
+            detail=f"Model returned invalid JSON: {text}"
         )
 
 
