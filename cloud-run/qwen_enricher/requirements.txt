@@ -1,4 +1,5 @@
+google-cloud-storage
+google-cloud-firestore
+google-genai
 fastapi
-uvicorn[standard]
-requests
-google-genai>=0.1.0
+uvicorn
