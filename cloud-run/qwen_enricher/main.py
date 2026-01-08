@@ -191,10 +191,13 @@ def extract_text(response) -> str:
 # -------------------------------------------------------------------
 def run_gemini(prompt: str, image_bytes: bytes) -> dict:
     try:
-        image_part = File(
-            mime_type="image/jpeg",
-            data=image_bytes
-        )
+        image_part = {
+    "inline_data": {
+        "mime_type": "image/jpeg",
+        "data": image_bytes
+    }
+}
+
 
         response = client.models.generate_content(
             model=GEMINI_MODEL,
