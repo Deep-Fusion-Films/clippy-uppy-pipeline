@@ -4,6 +4,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
 from google import genai
+from google.genai.types import File
 from google.cloud import storage, firestore
 
 app = FastAPI()
@@ -11,15 +12,10 @@ app = FastAPI()
 # -------------------------------------------------------------------
 # Vertex AI Gemini client (Cloud Run service account auth)
 # -------------------------------------------------------------------
-# IMPORTANT: This uses Cloud Run's service account credentials.
-# Make sure the service account has:
-# - roles/aiplatform.publisherModelUser
-# - roles/storage.objectAdmin (or similar for GCS)
-# - roles/datastore.user (for Firestore)
 client = genai.Client(
     vertexai=True,
     project="deepfusion-clippyuppy-pipeline",
-    location="europe-west1",
+    location="europe-west1"
 )
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
@@ -33,7 +29,7 @@ METADATA_BUCKET = os.getenv("METADATA_BUCKET", "df-films-metadata-euw1")
 
 
 # -------------------------------------------------------------------
-# Utility: load image bytes from Cloud Storage
+# Load image bytes from GCS
 # -------------------------------------------------------------------
 def load_image_from_gcs(bucket: str, file_name: str) -> bytes:
     try:
@@ -43,40 +39,36 @@ def load_image_from_gcs(bucket: str, file_name: str) -> bytes:
         if not blob.exists():
             raise HTTPException(
                 status_code=404,
-                detail=f"Image not found in GCS: gs://{bucket}/{file_name}",
+                detail=f"Image not found in GCS: gs://{bucket}/{file_name}"
             )
 
         return blob.download_as_bytes()
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to load image from GCS: {e}",
+            detail=f"Failed to load image from GCS: {e}"
         )
 
 
 # -------------------------------------------------------------------
-# Utility: strip Markdown fences from model output
+# Strip Markdown fences from model output
 # -------------------------------------------------------------------
 def strip_markdown_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
-        # Remove leading ``` or ```json
-        parts = text.split("```", 1)
-        if len(parts) > 1:
-            text = parts[1]
-        # Remove trailing ```
+        text = text.split("```", 1)[1]
         if "```" in text:
             text = text.rsplit("```", 1)[0]
     return text.strip()
 
 
 # -------------------------------------------------------------------
-# Schema block (kept consistent with your previous design)
+# Schema block
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """
-Schema (types):
 {
   "description_long": string,
   "entities": {
@@ -141,11 +133,11 @@ Schema (types):
 
 
 # -------------------------------------------------------------------
-# Prompt builder – strongly prioritises the actual image
+# Prompt builder
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict) -> str:
     template = """
-You are an image analyst for a factual documentary.
+You are an image/video analyst for a factual documentary.
 
 You are given:
 - A REAL image (primary source of truth)
@@ -157,69 +149,65 @@ Your job:
 - Never invent people, locations, or objects that are not clearly visible.
 
 Output STRICT JSON only, matching the schema below.
-Focus on composition, lighting, micro-differences, and discriminative details that would
-distinguish this image from near-duplicates.
+Do NOT wrap the JSON in markdown fences.
 
+Schema:
 {schema}
 
-Rules:
-- Trust the IMAGE over metadata. If metadata contradicts the image, follow the image.
-- If uncertain, use null or [] and lower confidence.
-- Do NOT wrap the JSON in markdown fences.
-- Do NOT include any extra fields beyond the schema.
-- The output must be a single JSON object.
-
-### Provided Metadata (may be incomplete or partially wrong)
+Metadata (may be incomplete or wrong):
 {metadata}
 """
     return template.format(
         schema=SCHEMA_BLOCK,
-        metadata=json.dumps(asset_json, indent=2),
+        metadata=json.dumps(asset_json, indent=2)
     ).strip()
 
 
 # -------------------------------------------------------------------
-# Extract text safely from Gemini response
+# Extract text from Gemini response
 # -------------------------------------------------------------------
 def extract_text(response) -> str:
-    # New genai client exposes .text for simple responses
     if hasattr(response, "text") and isinstance(response.text, str):
         return response.text
 
-    # Fallback for more structured responses
     try:
         candidates = getattr(response, "candidates", None)
         if candidates:
             parts = candidates[0].content.parts
             for part in parts:
-                if hasattr(part, "text") and isinstance(part.text, str):
+                if hasattr(part, "text"):
                     return part.text
     except Exception:
         pass
 
     raise HTTPException(
         status_code=500,
-        detail="Model response did not contain text output.",
+        detail="Model response did not contain text output."
     )
 
 
 # -------------------------------------------------------------------
-# Gemini multimodal inference (image + prompt)
+# Gemini multimodal inference (correct File() usage)
 # -------------------------------------------------------------------
 def run_gemini(prompt: str, image_bytes: bytes) -> dict:
     try:
+        image_part = File(
+            mime_type="image/jpeg",
+            data=image_bytes
+        )
+
         response = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[
                 {"text": prompt},
-                {"image": image_bytes},
-            ],
+                image_part
+            ]
         )
+
     except Exception as e:
-        # Surface the error so you see it clearly in FastAPI
         raise HTTPException(
             status_code=500,
-            detail=f"Error calling Gemini model: {e}",
+            detail=f"Error calling Gemini model: {e}"
         )
 
     text = extract_text(response)
@@ -230,12 +218,12 @@ def run_gemini(prompt: str, image_bytes: bytes) -> dict:
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=500,
-            detail=f"Model returned invalid JSON: {text}",
+            detail=f"Model returned invalid JSON: {text}"
         )
 
 
 # -------------------------------------------------------------------
-# Write metadata to Cloud Storage
+# Write metadata to GCS
 # -------------------------------------------------------------------
 def write_metadata_to_gcs(asset_id: str, data: dict):
     try:
@@ -243,12 +231,12 @@ def write_metadata_to_gcs(asset_id: str, data: dict):
         blob = bucket.blob(f"{asset_id}.json")
         blob.upload_from_string(
             json.dumps(data, indent=2),
-            content_type="application/json",
+            content_type="application/json"
         )
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to write metadata to GCS: {e}",
+            detail=f"Failed to write metadata to GCS: {e}"
         )
 
 
@@ -262,7 +250,7 @@ def write_metadata_to_firestore(asset_id: str, data: dict):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to write metadata to Firestore: {e}",
+            detail=f"Failed to write metadata to Firestore: {e}"
         )
 
 
@@ -280,24 +268,17 @@ async def enrich(req: Request):
     if not asset_id or not bucket or not file_name:
         raise HTTPException(
             status_code=400,
-            detail="asset_id, bucket, and file_name are required",
+            detail="asset_id, bucket, and file_name are required"
         )
 
-    # Load the real image
     image_bytes = load_image_from_gcs(bucket, file_name)
-
-    # Build prompt with metadata (image is primary truth)
     prompt = build_prompt(asset_json)
-
-    # Run Gemini multimodal
     enriched = run_gemini(prompt, image_bytes)
 
-    # Attach analysis + pipeline status
     asset_json["analysis"] = enriched
     asset_json["status"] = "enriched"
     asset_json["timestamp"] = datetime.utcnow().isoformat() + "Z"
 
-    # Persist metadata
     write_metadata_to_gcs(asset_id, asset_json)
     write_metadata_to_firestore(asset_id, asset_json)
 
