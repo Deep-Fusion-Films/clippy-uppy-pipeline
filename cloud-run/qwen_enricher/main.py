@@ -7,10 +7,13 @@ from google import genai
 app = FastAPI()
 
 # -------------------------------------------------------------------
-# Gemini client (Cloud Run service account auth)
+# Vertex AI Gemini client (Cloud Run service account auth)
 # -------------------------------------------------------------------
-# DO NOT pass an API key. Cloud Run provides credentials automatically.
-client = genai.Client()
+client = genai.Client(
+    vertexai=True,
+    project="deepfusion-clippyuppy-pipeline",
+    location="europe-west1"
+)
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
@@ -22,12 +25,13 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 def health():
     return {
         "status": "ok",
-        "model": GEMINI_MODEL
+        "model": GEMINI_MODEL,
+        "mode": "vertex-ai"
     }
 
 
 # -------------------------------------------------------------------
-# Schema block (literal string, safe)
+# Schema block (literal string)
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """
 Schema (types):
@@ -120,7 +124,7 @@ def extract_text(response) -> str:
 
 
 # -------------------------------------------------------------------
-# Gemini Flash inference (correct signature for your SDK)
+# Gemini Flash inference (Vertex AI mode)
 # -------------------------------------------------------------------
 def run_gemini(prompt: str) -> dict:
     response = client.models.generate_content(
