@@ -7,18 +7,12 @@ from google import genai
 app = FastAPI()
 
 # -------------------------------------------------------------------
-# Environment variables
+# Gemini client (Cloud Run service account auth)
 # -------------------------------------------------------------------
-VERTEX_API_KEY = os.getenv("VERTEX_API_KEY")
+# DO NOT pass an API key. Cloud Run provides credentials automatically.
+client = genai.Client()
+
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
-
-if not VERTEX_API_KEY:
-    raise RuntimeError("VERTEX_API_KEY must be set")
-
-client = genai.Client(api_key=VERTEX_API_KEY)
 
 
 # -------------------------------------------------------------------
@@ -28,14 +22,12 @@ client = genai.Client(api_key=VERTEX_API_KEY)
 def health():
     return {
         "status": "ok",
-        "model": GEMINI_MODEL,
-        "max_tokens": MAX_TOKENS,
-        "temperature": TEMPERATURE
+        "model": GEMINI_MODEL
     }
 
 
 # -------------------------------------------------------------------
-# Schema block (safe literal string)
+# Schema block (literal string, safe)
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """
 Schema (types):
@@ -78,7 +70,7 @@ Schema (types):
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict) -> str:
     template = """
-You are an image/video analyst for a factual documentary. Produce nuanced, discriminative analyses that can distinguish between hundreds of near-identical images.
+You are an image analyst for a factual documentary. Produce nuanced, discriminative analyses that can distinguish between hundreds of near-identical images.
 
 Output STRICT JSON only, matching the schema below. Prefer concrete details (composition, lighting, micro-differences) over generic tags.
 
@@ -102,11 +94,9 @@ Rules:
 # Extract text safely from google‑genai response
 # -------------------------------------------------------------------
 def extract_text(response) -> str:
-    # Preferred: response.text
     if hasattr(response, "text") and isinstance(response.text, str):
         return response.text
 
-    # Fallback: candidates[0].content.parts[0].text
     try:
         candidates = getattr(response, "candidates", None)
         if candidates:
@@ -116,7 +106,6 @@ def extract_text(response) -> str:
     except Exception:
         pass
 
-    # Last resort: try JSON
     try:
         data = json.loads(response.to_json())
         if isinstance(data, dict) and "text" in data:
@@ -131,7 +120,7 @@ def extract_text(response) -> str:
 
 
 # -------------------------------------------------------------------
-# Gemini Flash inference (correct API signature)
+# Gemini Flash inference (correct signature for your SDK)
 # -------------------------------------------------------------------
 def run_gemini(prompt: str) -> dict:
     response = client.models.generate_content(
