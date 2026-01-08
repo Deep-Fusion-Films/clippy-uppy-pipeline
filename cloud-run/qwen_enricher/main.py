@@ -4,7 +4,6 @@ from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
 from google import genai
-from google.genai.types import File
 from google.cloud import storage, firestore
 
 app = FastAPI()
@@ -12,10 +11,14 @@ app = FastAPI()
 # -------------------------------------------------------------------
 # Vertex AI Gemini client (Cloud Run service account auth)
 # -------------------------------------------------------------------
+# Requires service account with:
+# - roles/aiplatform.user
+# - roles/storage.objectAdmin (or similar)
+# - roles/datastore.user (for Firestore)
 client = genai.Client(
     vertexai=True,
     project="deepfusion-clippyuppy-pipeline",
-    location="europe-west1"
+    location="europe-west1",
 )
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
@@ -39,30 +42,51 @@ def load_image_from_gcs(bucket: str, file_name: str) -> bytes:
         if not blob.exists():
             raise HTTPException(
                 status_code=404,
-                detail=f"Image not found in GCS: gs://{bucket}/{file_name}"
+                detail=f"Image not found in GCS: gs://{bucket}/{file_name}",
             )
 
-        return blob.download_as_bytes()
+        image_bytes = blob.download_as_bytes()
+        if not image_bytes:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Image in GCS is empty: gs://{bucket}/{file_name}",
+            )
+
+        return image_bytes
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to load image from GCS: {e}"
+            detail=f"Failed to load image from GCS: {e}",
         )
 
 
 # -------------------------------------------------------------------
-# Strip Markdown fences from model output
+# Strip markdown fences from model output
 # -------------------------------------------------------------------
 def strip_markdown_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
-        text = text.split("```", 1)[1]
+        # remove leading ``` or ```json
+        parts = text.split("```", 1)
+        if len(parts) > 1:
+            text = parts[1]
+        # remove trailing ```
         if "```" in text:
             text = text.rsplit("```", 1)[0]
     return text.strip()
+
+
+# -------------------------------------------------------------------
+# Strip leading 'json' token from model output
+# -------------------------------------------------------------------
+def strip_leading_json_token(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.lower().startswith("json"):
+        cleaned = cleaned[4:].strip()
+    return cleaned
 
 
 # -------------------------------------------------------------------
@@ -133,11 +157,11 @@ SCHEMA_BLOCK = """
 
 
 # -------------------------------------------------------------------
-# Prompt builder
+# Prompt builder (image is primary truth)
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict) -> str:
     template = """
-You are an image/video analyst for a factual documentary.
+You are an image analyst for a factual documentary.
 
 You are given:
 - A REAL image (primary source of truth)
@@ -150,6 +174,8 @@ Your job:
 
 Output STRICT JSON only, matching the schema below.
 Do NOT wrap the JSON in markdown fences.
+Do NOT include any keys not defined in the schema.
+Do NOT prepend language tags like 'json' or explanations.
 
 Schema:
 {schema}
@@ -159,7 +185,7 @@ Metadata (may be incomplete or wrong):
 """
     return template.format(
         schema=SCHEMA_BLOCK,
-        metadata=json.dumps(asset_json, indent=2)
+        metadata=json.dumps(asset_json, indent=2),
     ).strip()
 
 
@@ -167,61 +193,63 @@ Metadata (may be incomplete or wrong):
 # Extract text from Gemini response
 # -------------------------------------------------------------------
 def extract_text(response) -> str:
+    # Simple path: response.text
     if hasattr(response, "text") and isinstance(response.text, str):
         return response.text
 
+    # Fallback: first candidate, first text part
     try:
         candidates = getattr(response, "candidates", None)
         if candidates:
             parts = candidates[0].content.parts
             for part in parts:
-                if hasattr(part, "text"):
+                if hasattr(part, "text") and isinstance(part.text, str):
                     return part.text
     except Exception:
         pass
 
     raise HTTPException(
         status_code=500,
-        detail="Model response did not contain text output."
+        detail="Model response did not contain text output.",
     )
 
 
 # -------------------------------------------------------------------
-# Gemini multimodal inference (correct File() usage)
+# Gemini multimodal inference with correct inline_data usage
 # -------------------------------------------------------------------
 def run_gemini(prompt: str, image_bytes: bytes) -> dict:
     try:
         image_part = {
-    "inline_data": {
-        "mime_type": "image/jpeg",
-        "data": image_bytes
-    }
-}
-
+            "inline_data": {
+                "mime_type": "image/jpeg",
+                "data": image_bytes,
+            }
+        }
 
         response = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[
                 {"text": prompt},
-                image_part
-            ]
+                image_part,
+            ],
         )
 
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error calling Gemini model: {e}"
+            detail=f"Error calling Gemini model: {e}",
         )
 
     text = extract_text(response)
     text = strip_markdown_fences(text)
+    text = strip_leading_json_token(text)
 
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=500,
-            detail=f"Model returned invalid JSON: {text}"
+            detail=f"Model returned invalid JSON: {text}",
         )
 
 
@@ -234,12 +262,12 @@ def write_metadata_to_gcs(asset_id: str, data: dict):
         blob = bucket.blob(f"{asset_id}.json")
         blob.upload_from_string(
             json.dumps(data, indent=2),
-            content_type="application/json"
+            content_type="application/json",
         )
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to write metadata to GCS: {e}"
+            detail=f"Failed to write metadata to GCS: {e}",
         )
 
 
@@ -253,7 +281,7 @@ def write_metadata_to_firestore(asset_id: str, data: dict):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to write metadata to Firestore: {e}"
+            detail=f"Failed to write metadata to Firestore: {e}",
         )
 
 
@@ -271,7 +299,7 @@ async def enrich(req: Request):
     if not asset_id or not bucket or not file_name:
         raise HTTPException(
             status_code=400,
-            detail="asset_id, bucket, and file_name are required"
+            detail="asset_id, bucket, and file_name are required",
         )
 
     image_bytes = load_image_from_gcs(bucket, file_name)
