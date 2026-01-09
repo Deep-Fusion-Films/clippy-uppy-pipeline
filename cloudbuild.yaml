@@ -88,16 +88,16 @@ steps:
     '--memory','2Gi'
   ]
 
-# --- Build & Deploy getty_enricher ---
+# --- Build & Deploy getty_ingestor (NEW) ---
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest', './cloud-run/getty_enricher']
+  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_ingestor:latest', './cloud-run/getty_ingestor']
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest']
+  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_ingestor:latest']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
-    'run','deploy','getty-enricher-service',
-    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest',
+    'run','deploy','getty-ingestor-service',
+    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_ingestor:latest',
     '--region','${_REGION}',
     '--platform','managed',
     '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
@@ -109,16 +109,16 @@ steps:
     '--memory','1Gi'
   ]
 
-# --- Build & Deploy qwen_enricher ---
+# --- Build & Deploy gemini_enricher (RENAMED) ---
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest', './cloud-run/qwen_enricher']
+  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/gemini_enricher:latest', './cloud-run/gemini_enricher']
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest']
+  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/gemini_enricher:latest']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
-    'run','deploy','qwen-enricher-service',
-    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest',
+    'run','deploy','gemini-enricher-service',
+    '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/gemini_enricher:latest',
     '--region','${_REGION}',
     '--platform','managed',
     '--service-account','clippy-uppy-sa@$PROJECT_ID.iam.gserviceaccount.com',
@@ -156,6 +156,7 @@ images:
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest'
-- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_enricher:latest'
-- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/qwen_enricher:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_ingestor:latest'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/gemini_enricher:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest'
+
