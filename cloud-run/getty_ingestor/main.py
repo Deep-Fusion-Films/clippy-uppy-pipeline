@@ -6,27 +6,27 @@ from typing import Optional, Dict, Any, List
 import requests
 from fastapi import FastAPI, Request, HTTPException
 from datetime import datetime
+
 import google.auth.transport.requests
 import google.oauth2.id_token
 
 app = FastAPI()
 
 # -------------------------------------------------------------------
-# Environment / Config
+# Environment / config
 # -------------------------------------------------------------------
 GETTY_API_KEY = os.getenv("GETTY_API_KEY")
 GETTY_API_SECRET = os.getenv("GETTY_API_SECRET")
+GETTY_API_BASE = os.getenv("GETTY_API_BASE", "https://api.gettyimages.com")
+START_PIPELINE_URL = os.getenv("START_PIPELINE_URL")
 
 if not GETTY_API_KEY or not GETTY_API_SECRET:
     raise RuntimeError("GETTY_API_KEY and GETTY_API_SECRET must be set")
 
-GETTY_API_BASE = os.getenv("GETTY_API_BASE", "https://api.gettyimages.com")
-START_PIPELINE_URL = os.getenv("START_PIPELINE_URL")
-
 if not START_PIPELINE_URL:
     raise RuntimeError("START_PIPELINE_URL must be set")
 
-# simple in-memory token cache
+# Simple in-memory token cache
 _getty_token: Optional[str] = None
 _getty_token_expiry: float = 0.0
 
@@ -35,10 +35,15 @@ _getty_token_expiry: float = 0.0
 # Getty OAuth2 token handling
 # -------------------------------------------------------------------
 def get_getty_access_token() -> str:
+    """
+    Get or refresh a Getty OAuth2 access token.
+    Uses client credentials grant.
+    """
     global _getty_token, _getty_token_expiry
 
     now = time.time()
     if _getty_token and now < _getty_token_expiry - 60:
+        # Token still valid
         return _getty_token
 
     token_url = f"{GETTY_API_BASE}/oauth2/token"
@@ -63,15 +68,22 @@ def get_getty_access_token() -> str:
         )
 
     payload = resp.json()
-    _getty_token = payload.get("access_token")
-    expires_in = payload.get("expires_in", 1800)
-    _getty_token_expiry = now + expires_in
-
-    if not _getty_token:
+    token = payload.get("access_token")
+    if not token:
         raise HTTPException(
             status_code=500,
             detail="Getty OAuth2 response missing access_token",
         )
+
+    # expires_in may come back as a string; cast to int
+    expires_raw = payload.get("expires_in", 1800)
+    try:
+        expires_in = int(expires_raw)
+    except (TypeError, ValueError):
+        expires_in = 1800  # fallback
+
+    _getty_token = token
+    _getty_token_expiry = now + float(expires_in)
 
     return _getty_token
 
@@ -140,9 +152,12 @@ def search_videos(query: str, page: int = 1, page_size: int = 1) -> List[Dict[st
 
 
 # -------------------------------------------------------------------
-# Getty download helpers
+# Getty download helpers (correct endpoints)
 # -------------------------------------------------------------------
 def get_image_download_url(asset_id: str) -> str:
+    """
+    Use Getty's official image download endpoint to get a temporary URI.
+    """
     url = f"{GETTY_API_BASE}/v3/downloads/images/{asset_id}"
     body = {
         "auto_download": False
@@ -174,6 +189,9 @@ def get_image_download_url(asset_id: str) -> str:
 
 
 def get_video_download_url(asset_id: str) -> str:
+    """
+    Use Getty's official video download endpoint to get a temporary URI.
+    """
     url = f"{GETTY_API_BASE}/v3/downloads/videos/{asset_id}"
     body = {
         "auto_download": False
@@ -205,6 +223,9 @@ def get_video_download_url(asset_id: str) -> str:
 
 
 def fetch_bytes_from_url(url: str) -> bytes:
+    """
+    Download media bytes into memory only (no storage).
+    """
     try:
         resp = requests.get(url, timeout=30)
     except Exception as e:
@@ -233,6 +254,10 @@ def fetch_bytes_from_url(url: str) -> bytes:
 # Call start_pipeline (authenticated Cloud Run call)
 # -------------------------------------------------------------------
 def call_start_pipeline(payload: dict) -> dict:
+    """
+    Call the start_pipeline Cloud Run service using an ID token.
+    Expects /run_all as the pipeline entrypoint.
+    """
     if not START_PIPELINE_URL:
         raise HTTPException(
             status_code=500,
@@ -240,7 +265,13 @@ def call_start_pipeline(payload: dict) -> dict:
         )
 
     auth_req = google.auth.transport.requests.Request()
-    token = google.oauth2.id_token.fetch_id_token(auth_req, START_PIPELINE_URL)
+    try:
+        token = google.oauth2.id_token.fetch_id_token(auth_req, START_PIPELINE_URL)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to obtain ID token for start_pipeline: {e}",
+        )
 
     try:
         resp = requests.post(
@@ -261,13 +292,19 @@ def call_start_pipeline(payload: dict) -> dict:
             detail=f"start_pipeline returned error: {resp.text}",
         )
 
-    return resp.json()
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"start_pipeline returned invalid JSON: {e}",
+        )
 
 
 # -------------------------------------------------------------------
 # Utility: determine media type for an asset
 # -------------------------------------------------------------------
-def infer_media_type_from_asset(asset: Dict[str, Any], kind: str) -> str:
+def infer_media_type_from_search_kind(kind: str) -> str:
     """
     kind: 'image' or 'video' depending on which search produced it.
     """
@@ -296,6 +333,20 @@ def health():
 # -------------------------------------------------------------------
 @app.post("/search")
 async def search(req: Request):
+    """
+    Search Getty for assets.
+
+    Body:
+    {
+      "query": "mountain",
+      "page": 1,
+      "page_size": 1
+    }
+
+    Returns:
+      - images first (if any)
+      - otherwise videos
+    """
     body = await req.json()
     query = body.get("query")
     page = body.get("page", 1)
@@ -307,7 +358,6 @@ async def search(req: Request):
             detail="query is required",
         )
 
-    # First try images, then videos if no images found
     images = search_images(query, page=page, page_size=page_size)
     if images:
         return images
@@ -322,18 +372,21 @@ async def search(req: Request):
 @app.post("/process")
 async def process(req: Request):
     """
-    Accepts either:
-    - { "asset_id": "2196875009", "media_type": "image" | "video" }
-    - { "query": "woman hiking near mountains" }
+    Main Getty ingestion endpoint.
 
-    If query is provided, it will:
-      - Search images first; if none found, search videos.
+    Accepts either:
+      - { "asset_id": "2196875009", "media_type": "image" | "video" }
+      - { "query": "woman hiking near mountains" }
+
+    Behavior:
+      - If query is provided, search images first; if none, search videos.
       - Take the first result.
-    Then:
-      - Call Getty downloads API to get a download URL.
-      - Download the media bytes.
-      - Base64-encode the bytes.
-      - Forward to start_pipeline as a Getty asset.
+      - Infer media_type from search kind.
+      - Call Getty downloads API to obtain a temporary download URI.
+      - Download bytes into memory (no storage).
+      - Base64-encode those bytes.
+      - Call start_pipeline(/run_all) with a Getty payload.
+      - Return pipeline_result plus a small wrapper.
     """
     body = await req.json()
 
@@ -371,7 +424,7 @@ async def process(req: Request):
                 detail="Getty search result missing asset id",
             )
 
-        media_type = infer_media_type_from_asset(asset, search_kind)
+        media_type = infer_media_type_from_search_kind(search_kind)
 
     # -----------------------------------------------------------------
     # Path 2: explicit asset_id (and optional explicit media_type)
@@ -379,8 +432,8 @@ async def process(req: Request):
     elif asset_id:
         # If media_type is provided by caller, trust it; otherwise assume image.
         media_type = explicit_media_type or "image"
-        asset = {"id": asset_id}  # minimal; we won't have full metadata here
         search_kind = media_type
+        asset = {"id": asset_id}  # minimal placeholder
 
     else:
         raise HTTPException(
@@ -400,21 +453,16 @@ async def process(req: Request):
     media_b64 = base64.b64encode(media_bytes).decode("utf-8")
 
     # -----------------------------------------------------------------
-    # Build Getty metadata payload
-    # -----------------------------------------------------------------
-    getty_metadata = asset or {}
-    getty_metadata["search_kind"] = search_kind
-    getty_metadata["resolved_media_type"] = media_type
-
-    # -----------------------------------------------------------------
     # Build payload for start_pipeline
     # -----------------------------------------------------------------
     pipeline_payload = {
         "asset_id": asset_id,
         "source": "getty",
-        "media_type": media_type,         # "image" or "video"
+        "media_type": media_type,  # "image" or "video"
         "media_bytes": media_b64,
-        "getty_metadata": getty_metadata,
+        # You can still pass minimal metadata through if you want,
+        # but we’re not returning it directly from this service
+        "getty_metadata": asset or {},
     }
 
     pipeline_result = call_start_pipeline(pipeline_payload)
@@ -423,6 +471,7 @@ async def process(req: Request):
         "asset_id": asset_id,
         "query": query,
         "media_type": media_type,
+        "search_kind": search_kind,
         "status": "processed",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "pipeline_result": pipeline_result,
