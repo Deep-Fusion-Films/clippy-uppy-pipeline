@@ -5,6 +5,7 @@ from datetime import datetime
 import google.auth.transport.requests
 import google.oauth2.id_token
 import copy
+import base64
 
 app = FastAPI()
 
@@ -13,14 +14,14 @@ GETTY_URL = os.getenv("GETTY_URL")
 TRANSCODE_URL = os.getenv("TRANSCODE_URL")
 TRANSCRIBE_URL = os.getenv("TRANSCRIBE_URL")
 FRAMES_URL = os.getenv("FRAMES_URL")
-QWEN_URL = os.getenv("QWEN_URL")
+ENRICHER_URL = os.getenv("ENRICHER_URL")  # renamed from QWEN_URL
 STORE_URL = os.getenv("STORE_URL")
 
 
 # ---------------------------------------------------------
 # ASSET TYPE DETECTION
 # ---------------------------------------------------------
-def detect_asset_type(file_name: str) -> str:
+def detect_asset_type_from_filename(file_name: str) -> str:
     ext = os.path.splitext(file_name.lower())[1]
     if ext in [".mp4", ".mov", ".mkv", ".avi"]:
         return "video"
@@ -57,7 +58,6 @@ def call_service(url: str, endpoint: str, payload: dict) -> dict:
 # DEEP MERGE UTILITY
 # ---------------------------------------------------------
 def deep_merge(a: dict, b: dict) -> dict:
-    """Recursively merge dict b into dict a."""
     result = copy.deepcopy(a)
     for key, value in b.items():
         if (
@@ -72,19 +72,52 @@ def deep_merge(a: dict, b: dict) -> dict:
 
 
 # ---------------------------------------------------------
-# INPUT NORMALISATION
+# INPUT NORMALISATION (MULTI‑INPUT)
 # ---------------------------------------------------------
 def build_initial_payload(data: dict) -> dict:
-    if "asset_id" in data:
-        return call_service(GETTY_URL, "validate", {"asset_id": data["asset_id"]})
+    """
+    Supports:
+    - Getty ingestion (media_bytes + media_type + getty_metadata)
+    - GCS ingestion (file_name + bucket)
+    - Direct upload (media_bytes + media_type)
+    - URL ingestion (url)
+    """
 
+    # -----------------------------------------------------
+    # 1. Getty ingestion (raw bytes + metadata)
+    # -----------------------------------------------------
+    if "media_bytes" in data and data.get("source") == "getty":
+        return {
+            "asset_id": data.get("asset_id", "getty_asset"),
+            "source": "getty",
+            "media_type": data["media_type"],
+            "media_bytes": data["media_bytes"],
+            "getty_metadata": data.get("getty_metadata", {}),
+            "asset_type": data["media_type"],  # image or video
+        }
+
+    # -----------------------------------------------------
+    # 2. Direct upload (raw bytes)
+    # -----------------------------------------------------
+    if "media_bytes" in data and "media_type" in data:
+        return {
+            "asset_id": data.get("asset_id", "direct_upload"),
+            "source": "upload",
+            "media_type": data["media_type"],
+            "media_bytes": data["media_bytes"],
+            "asset_type": data["media_type"],
+        }
+
+    # -----------------------------------------------------
+    # 3. GCS-based ingestion (existing behavior)
+    # -----------------------------------------------------
     if "file_name" in data and "bucket" in data:
         file_name = data["file_name"]
         bucket = data["bucket"]
         source = data.get("source", "local")
         asset_id = os.path.splitext(os.path.basename(file_name))[0]
 
-        asset_type = detect_asset_type(file_name)
+        asset_type = detect_asset_type_from_filename(file_name)
 
         return {
             "asset_id": asset_id,
@@ -97,9 +130,20 @@ def build_initial_payload(data: dict) -> dict:
             }
         }
 
+    # -----------------------------------------------------
+    # 4. URL ingestion (optional)
+    # -----------------------------------------------------
+    if "url" in data:
+        return {
+            "asset_id": data.get("asset_id", "url_asset"),
+            "source": "url",
+            "url": data["url"],
+            "asset_type": "unknown"
+        }
+
     raise HTTPException(
         status_code=400,
-        detail="Invalid input: provide asset_id OR file_name + bucket"
+        detail="Invalid input: provide media_bytes OR file_name+bucket OR url"
     )
 
 
@@ -115,7 +159,7 @@ def health():
             "transcode": TRANSCODE_URL,
             "transcribe": TRANSCRIBE_URL,
             "frames": FRAMES_URL,
-            "qwen": QWEN_URL,
+            "enricher": ENRICHER_URL,
             "store": STORE_URL
         }
     }
@@ -134,8 +178,8 @@ async def run_all(req: Request):
 
     merged = payload
 
-    # Step 1: Transcode (video only)
-    if asset_type == "video":
+    # Step 1: Transcode (video only, and only if using GCS or URL)
+    if asset_type == "video" and "media_bytes" not in payload:
         transcode_json = call_service(TRANSCODE_URL, "transcode", merged)
         merged = deep_merge(merged, transcode_json)
 
@@ -144,14 +188,14 @@ async def run_all(req: Request):
         transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", merged)
         merged = deep_merge(merged, transcribe_json)
 
-    # Step 3: Sample frames (video only)
-    if asset_type == "video":
+    # Step 3: Sample frames (video only, and only if using GCS or URL)
+    if asset_type == "video" and "media_bytes" not in payload:
         frames_json = call_service(FRAMES_URL, "sample", merged)
         merged = deep_merge(merged, frames_json)
 
-    # Step 4: Qwen enrichment (always runs)
-    qwen_json = call_service(QWEN_URL, "enrich", merged)
-    merged["qwen"] = qwen_json
+    # Step 4: Enrichment (always runs)
+    enrich_json = call_service(ENRICHER_URL, "enrich", merged)
+    merged["analysis"] = enrich_json
 
     # Step 5: Store metadata (always runs)
     stored_json = call_service(STORE_URL, "store", merged)
