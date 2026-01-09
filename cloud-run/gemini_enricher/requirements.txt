@@ -1,1 +1,5 @@
-
+google-cloud-storage
+google-cloud-firestore
+google-genai
+fastapi
+uvicorn
