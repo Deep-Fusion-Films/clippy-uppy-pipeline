@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
@@ -11,10 +12,6 @@ app = FastAPI()
 # -------------------------------------------------------------------
 # Vertex AI Gemini client (Cloud Run service account auth)
 # -------------------------------------------------------------------
-# Requires service account with:
-# - roles/aiplatform.user
-# - roles/storage.objectAdmin (or similar)
-# - roles/datastore.user (for Firestore)
 client = genai.Client(
     vertexai=True,
     project="deepfusion-clippyuppy-pipeline",
@@ -32,9 +29,9 @@ METADATA_BUCKET = os.getenv("METADATA_BUCKET", "df-films-metadata-euw1")
 
 
 # -------------------------------------------------------------------
-# Load image bytes from GCS
+# Load bytes from GCS
 # -------------------------------------------------------------------
-def load_image_from_gcs(bucket: str, file_name: str) -> bytes:
+def load_from_gcs(bucket: str, file_name: str) -> bytes:
     try:
         bucket_obj = storage_client.bucket(bucket)
         blob = bucket_obj.blob(file_name)
@@ -42,45 +39,43 @@ def load_image_from_gcs(bucket: str, file_name: str) -> bytes:
         if not blob.exists():
             raise HTTPException(
                 status_code=404,
-                detail=f"Image not found in GCS: gs://{bucket}/{file_name}",
+                detail=f"File not found in GCS: gs://{bucket}/{file_name}",
             )
 
-        image_bytes = blob.download_as_bytes()
-        if not image_bytes:
+        file_bytes = blob.download_as_bytes()
+        if not file_bytes:
             raise HTTPException(
                 status_code=500,
-                detail=f"Image in GCS is empty: gs://{bucket}/{file_name}",
+                detail=f"File in GCS is empty: gs://{bucket}/{file_name}",
             )
 
-        return image_bytes
+        return file_bytes
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to load image from GCS: {e}",
+            detail=f"Failed to load file from GCS: {e}",
         )
 
 
 # -------------------------------------------------------------------
-# Strip markdown fences from model output
+# Strip markdown fences
 # -------------------------------------------------------------------
 def strip_markdown_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
-        # remove leading ``` or ```json
         parts = text.split("```", 1)
         if len(parts) > 1:
             text = parts[1]
-        # remove trailing ```
         if "```" in text:
             text = text.rsplit("```", 1)[0]
     return text.strip()
 
 
 # -------------------------------------------------------------------
-# Strip leading 'json' token from model output
+# Strip leading 'json'
 # -------------------------------------------------------------------
 def strip_leading_json_token(text: str) -> str:
     cleaned = text.strip()
@@ -90,7 +85,7 @@ def strip_leading_json_token(text: str) -> str:
 
 
 # -------------------------------------------------------------------
-# Schema block
+# CLEANED SCHEMA BLOCK (Option B)
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """
 {
@@ -110,7 +105,7 @@ SCHEMA_BLOCK = """
       {
         "name": string|null,
         "sublocation": string|null,
-        "indoor_outdoor": "indoor"|"outdoor"|null
+        "indoor_outdoor": "indoor" | "outdoor" | null
       }
     ],
     "orgs": [
@@ -157,32 +152,37 @@ SCHEMA_BLOCK = """
 
 
 # -------------------------------------------------------------------
-# Prompt builder (image is primary truth)
+# Prompt builder
 # -------------------------------------------------------------------
-def build_prompt(asset_json: dict) -> str:
-    template = """
-You are an image analyst for a factual documentary.
+def build_prompt(asset_json: dict, media_type: str) -> str:
+    media_line = (
+        "You are given a REAL video." if media_type == "video"
+        else "You are given a REAL image."
+    )
 
-You are given:
-- A REAL image (primary source of truth)
-- Optional metadata (secondary, may be noisy or wrong)
+    template = f"""
+You are an analyst for a factual documentary.
+
+{media_line}
+Metadata may be incomplete or wrong.
 
 Your job:
-- Describe and analyse ONLY what is actually visible in the image.
-- Use metadata ONLY as a weak hint, and IGNORE it if it conflicts with the image.
-- Never invent people, locations, or objects that are not clearly visible.
+- Describe ONLY what is visible in the media.
+- Use metadata only as weak hints.
+- Never invent details not clearly visible.
 
-Output STRICT JSON only, matching the schema below.
-Do NOT wrap the JSON in markdown fences.
-Do NOT include any keys not defined in the schema.
-Do NOT prepend language tags like 'json' or explanations.
+Output STRICT JSON only.
+No markdown fences.
+No 'json' prefix.
+No extra keys.
 
 Schema:
-{schema}
+{{schema}}
 
-Metadata (may be incomplete or wrong):
-{metadata}
+Metadata:
+{{metadata}}
 """
+
     return template.format(
         schema=SCHEMA_BLOCK,
         metadata=json.dumps(asset_json, indent=2),
@@ -193,17 +193,15 @@ Metadata (may be incomplete or wrong):
 # Extract text from Gemini response
 # -------------------------------------------------------------------
 def extract_text(response) -> str:
-    # Simple path: response.text
     if hasattr(response, "text") and isinstance(response.text, str):
         return response.text
 
-    # Fallback: first candidate, first text part
     try:
         candidates = getattr(response, "candidates", None)
         if candidates:
             parts = candidates[0].content.parts
             for part in parts:
-                if hasattr(part, "text") and isinstance(part.text, str):
+                if hasattr(part, "text"):
                     return part.text
     except Exception:
         pass
@@ -215,14 +213,16 @@ def extract_text(response) -> str:
 
 
 # -------------------------------------------------------------------
-# Gemini multimodal inference with correct inline_data usage
+# Gemini inference (image or video)
 # -------------------------------------------------------------------
-def run_gemini(prompt: str, image_bytes: bytes) -> dict:
+def run_gemini(prompt: str, media_bytes: bytes, media_type: str) -> dict:
     try:
-        image_part = {
+        mime = "video/mp4" if media_type == "video" else "image/jpeg"
+
+        media_part = {
             "inline_data": {
-                "mime_type": "image/jpeg",
-                "data": image_bytes,
+                "mime_type": mime,
+                "data": media_bytes,
             }
         }
 
@@ -230,7 +230,7 @@ def run_gemini(prompt: str, image_bytes: bytes) -> dict:
             model=GEMINI_MODEL,
             contents=[
                 {"text": prompt},
-                image_part,
+                media_part,
             ],
         )
 
@@ -286,26 +286,48 @@ def write_metadata_to_firestore(asset_id: str, data: dict):
 
 
 # -------------------------------------------------------------------
-# Enrichment endpoint
+# Enrichment endpoint (multi‑input aware)
 # -------------------------------------------------------------------
 @app.post("/enrich")
 async def enrich(req: Request):
     asset_json = await req.json()
 
     asset_id = asset_json.get("asset_id")
-    bucket = asset_json.get("bucket")
-    file_name = asset_json.get("file_name")
+    media_type = asset_json.get("media_type", "image")
 
-    if not asset_id or not bucket or not file_name:
+    if not asset_id:
+        raise HTTPException(400, "asset_id is required")
+
+    # ---------------------------------------------------------
+    # 1. Getty or direct upload (media_bytes)
+    # ---------------------------------------------------------
+    if "media_bytes" in asset_json:
+        try:
+            media_bytes = base64.b64decode(asset_json["media_bytes"])
+        except Exception:
+            raise HTTPException(400, "Invalid base64 media_bytes")
+
+    # ---------------------------------------------------------
+    # 2. GCS mode (existing)
+    # ---------------------------------------------------------
+    elif "bucket" in asset_json and "file_name" in asset_json:
+        media_bytes = load_from_gcs(asset_json["bucket"], asset_json["file_name"])
+
+    else:
         raise HTTPException(
-            status_code=400,
-            detail="asset_id, bucket, and file_name are required",
+            400,
+            "Invalid input: provide media_bytes OR bucket+file_name"
         )
 
-    image_bytes = load_image_from_gcs(bucket, file_name)
-    prompt = build_prompt(asset_json)
-    enriched = run_gemini(prompt, image_bytes)
+    # ---------------------------------------------------------
+    # Build prompt + run Gemini
+    # ---------------------------------------------------------
+    prompt = build_prompt(asset_json, media_type)
+    enriched = run_gemini(prompt, media_bytes, media_type)
 
+    # ---------------------------------------------------------
+    # Merge + store metadata
+    # ---------------------------------------------------------
     asset_json["analysis"] = enriched
     asset_json["status"] = "enriched"
     asset_json["timestamp"] = datetime.utcnow().isoformat() + "Z"
