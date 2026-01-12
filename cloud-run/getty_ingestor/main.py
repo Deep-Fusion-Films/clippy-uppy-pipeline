@@ -10,7 +10,7 @@ app = FastAPI()
 GETTY_API_KEY = os.environ["GETTY_API_KEY"]
 GETTY_API_SECRET = os.environ["GETTY_API_SECRET"]
 START_PIPELINE_URL = os.environ["START_PIPELINE_URL"]
-TEMP_BUCKET = "clippyuppy-temp-ingestor"
+TEMP_BUCKET = os.environ.get("TEMP_BUCKET", "clippyuppy-temp-ingestor")
 
 _cached_token = None
 
@@ -44,7 +44,15 @@ def get_getty_access_token():
         "grant_type": "client_credentials"
     }
 
-    r = requests.post(url, data=data)
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "User-Agent": "python-requests"
+    }
+
+    r = requests.post(url, data=data, headers=headers)
+    if r.status_code != 200:
+        print("GETTY TOKEN ERROR:", r.text)
     r.raise_for_status()
 
     token = r.json()["access_token"]
@@ -62,6 +70,8 @@ def get_getty_search_results(query: str):
     params = {"phrase": query, "page_size": 1}
 
     r = requests.get(url, headers=headers, params=params)
+    if r.status_code != 200:
+        print("GETTY SEARCH ERROR:", r.text)
     r.raise_for_status()
 
     results = r.json().get("videos", [])
@@ -81,6 +91,7 @@ def get_getty_download_url(asset_id: str):
 
     r = requests.get(url, headers=headers)
     if r.status_code != 200:
+        print("GETTY DOWNLOAD ERROR:", r.text)
         raise HTTPException(
             status_code=400,
             detail=f"Getty video download failed: {r.text}"
@@ -148,12 +159,28 @@ def process_asset(req: ProcessRequest):
 
     r = requests.post(START_PIPELINE_URL, json=payload)
     if r.status_code != 200:
+        print("PIPELINE ERROR:", r.text)
         raise HTTPException(
             status_code=500,
             detail=f"start_pipeline returned error: {r.text}"
         )
 
     return {"status": "ok", "pipeline_response": r.json()}
+
+
+# -----------------------------
+# Debug Token Endpoint
+# -----------------------------
+@app.get("/debug-token")
+def debug_token():
+    try:
+        token = get_getty_access_token()
+        return {
+            "token_received": bool(token),
+            "token_preview": token[:10] + "..." if token else None
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # -----------------------------
