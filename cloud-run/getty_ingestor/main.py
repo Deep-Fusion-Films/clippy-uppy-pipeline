@@ -12,6 +12,8 @@ GETTY_API_SECRET = os.environ["GETTY_API_SECRET"]
 START_PIPELINE_URL = os.environ["START_PIPELINE_URL"]
 TEMP_BUCKET = "clippyuppy-temp-ingestor"
 
+_cached_token = None
+
 
 # -----------------------------
 # Request Models
@@ -26,15 +28,28 @@ class ProcessRequest(BaseModel):
 # Getty API Helpers
 # -----------------------------
 def get_getty_access_token():
+    """
+    Retrieve and cache a Getty OAuth token.
+    Getty tokens last ~1 hour, so caching avoids repeated requests.
+    """
+    global _cached_token
+
+    if _cached_token:
+        return _cached_token
+
     url = "https://api.gettyimages.com/oauth2/token"
     data = {
         "client_id": GETTY_API_KEY,
         "client_secret": GETTY_API_SECRET,
         "grant_type": "client_credentials"
     }
+
     r = requests.post(url, data=data)
     r.raise_for_status()
-    return r.json()["access_token"]
+
+    token = r.json()["access_token"]
+    _cached_token = token
+    return token
 
 
 def get_getty_search_results(query: str):
@@ -45,12 +60,12 @@ def get_getty_search_results(query: str):
 
     r = requests.get(url, headers=headers, params=params)
     r.raise_for_status()
-    results = r.json().get("images", [])
 
+    results = r.json().get("images", [])
     if not results:
         raise HTTPException(status_code=404, detail="No Getty results found")
 
-    return results[0]  # first result
+    return results[0]
 
 
 def get_getty_download_url(asset_id: str):
