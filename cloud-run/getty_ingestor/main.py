@@ -1,191 +1,247 @@
 import os
-import uuid
+import time
 import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from google.cloud import storage
 
 app = FastAPI()
 
+# -------------------------------------------------------------------
+# Configuration
+# -------------------------------------------------------------------
 GETTY_API_KEY = os.environ["GETTY_API_KEY"]
 GETTY_API_SECRET = os.environ["GETTY_API_SECRET"]
 START_PIPELINE_URL = os.environ["START_PIPELINE_URL"]
-TEMP_BUCKET = os.environ.get("TEMP_BUCKET", "clippyuppy-temp-ingestor")
 
-_cached_token = None
+# Simple in-memory token cache
+_getty_token_cache: dict | None = None
 
 
-# -----------------------------
-# Request Models
-# -----------------------------
-class ProcessRequest(BaseModel):
-    query: str | None = None
+# -------------------------------------------------------------------
+# Models
+# -------------------------------------------------------------------
+class SearchAndRunResponse(BaseModel):
+    stage: str
+    query: str
     asset_id: str | None = None
-    media_type: str | None = "video"   # default to video
+    pipeline_status: int | None = None
+    pipeline_preview: str | None = None
+    error: str | None = None
 
 
-# -----------------------------
-# Getty API Helpers
-# -----------------------------
-def get_getty_access_token():
+# -------------------------------------------------------------------
+# Getty helpers
+# -------------------------------------------------------------------
+def get_getty_access_token() -> str:
     """
-    Retrieve and cache a Getty OAuth token.
-    Getty tokens last ~1 hour, so caching avoids repeated requests.
+    Get and cache a Getty OAuth token (client_credentials).
+    Token is cached until expiry to avoid repeated calls.
     """
-    global _cached_token
+    global _getty_token_cache
 
-    if _cached_token:
-        return _cached_token
+    now = time.time()
+    if _getty_token_cache:
+        if now < _getty_token_cache["expires_at"]:
+            return _getty_token_cache["access_token"]
 
     url = "https://api.gettyimages.com/oauth2/token"
     data = {
         "client_id": GETTY_API_KEY,
         "client_secret": GETTY_API_SECRET,
-        "grant_type": "client_credentials"
+        "grant_type": "client_credentials",
     }
-
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "application/json",
-        "User-Agent": "python-requests"
+        "User-Agent": "python-requests",
     }
 
-    r = requests.post(url, data=data, headers=headers)
-    if r.status_code != 200:
-        print("GETTY TOKEN ERROR:", r.text)
-    r.raise_for_status()
+    resp = requests.post(url, data=data, headers=headers)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Getty auth failed: {resp.text[:500]}",
+        )
 
-    token = r.json()["access_token"]
-    _cached_token = token
-    return token
+    body = resp.json()
+    access_token = body["access_token"]
+    # Default expiry ~3600s; subtract a bit for safety
+    expires_in = body.get("expires_in", 3600)
+    _getty_token_cache = {
+        "access_token": access_token,
+        "expires_at": now + expires_in - 60,
+    }
+    return access_token
 
 
-def get_getty_search_results(query: str):
+def search_getty_videos(query: str) -> dict:
     """
-    Search Getty Creative Videos (test credentials support this).
+    Search Getty Creative Videos and return the first video object.
+    Strong, focused video search for ingestion.
     """
     token = get_getty_access_token()
     url = "https://api.gettyimages.com/v3/search/videos/creative"
-    headers = {"Authorization": f"Bearer {token}"}
-    params = {"phrase": query, "page_size": 1}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    params = {
+        "phrase": query,
+        "page_size": 1,
+    }
 
-    r = requests.get(url, headers=headers, params=params)
-    if r.status_code != 200:
-        print("GETTY SEARCH ERROR:", r.text)
-    r.raise_for_status()
+    resp = requests.get(url, headers=headers, params=params)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Getty search failed: {resp.text[:500]}",
+        )
 
-    results = r.json().get("videos", [])
-    if not results:
-        raise HTTPException(status_code=404, detail="No Getty video results found")
+    data = resp.json()
+    videos = data.get("videos", [])
+    if not videos:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No Getty video results found for query '{query}'",
+        )
 
-    return results[0]
+    return videos[0]
 
 
-def get_getty_download_url(asset_id: str):
+def get_getty_download_url(asset_id: str) -> str:
     """
     Retrieve the download URL for a Getty video asset.
     """
     token = get_getty_access_token()
     url = f"https://api.gettyimages.com/v3/downloads/{asset_id}"
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
 
-    r = requests.get(url, headers=headers)
-    if r.status_code != 200:
-        print("GETTY DOWNLOAD ERROR:", r.text)
+    resp = requests.get(url, headers=headers)
+    if resp.status_code != 200:
         raise HTTPException(
-            status_code=400,
-            detail=f"Getty video download failed: {r.text}"
+            status_code=502,
+            detail=f"Getty download lookup failed: {resp.text[:500]}",
         )
 
-    data = r.json()
+    data = resp.json()
     download_url = data.get("uri")
-
     if not download_url:
         raise HTTPException(
-            status_code=400,
-            detail=f"Getty did not return a video download URL: {data}"
+            status_code=502,
+            detail=f"Getty did not return a download URL: {data}",
         )
 
     return download_url
 
 
-# -----------------------------
-# GCS Streaming Upload
-# -----------------------------
-def upload_getty_media_to_gcs(download_url: str) -> str:
-    object_name = f"getty/{uuid.uuid4()}"
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(TEMP_BUCKET)
-    blob = bucket.blob(object_name)
-
-    with requests.get(download_url, stream=True) as r:
-        r.raise_for_status()
-        with blob.open("wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-
-    return f"gs://{TEMP_BUCKET}/{object_name}"
-
-
-# -----------------------------
-# Main Processing Endpoint
-# -----------------------------
-@app.post("/process")
-def process_asset(req: ProcessRequest):
-    # 1. Resolve asset ID
-    if req.asset_id:
-        asset_id = req.asset_id
-        metadata = {"asset_id": asset_id}
-    elif req.query:
-        result = get_getty_search_results(req.query)
-        asset_id = result["id"]
-        metadata = result
-    else:
-        raise HTTPException(status_code=400, detail="Provide query or asset_id")
-
-    # 2. Get Getty download URL
-    download_url = get_getty_download_url(asset_id)
-
-    # 3. Stream into GCS
-    gcs_url = upload_getty_media_to_gcs(download_url)
-
-    # 4. Send tiny payload to start_pipeline
+def trigger_pipeline(asset_id: str, metadata: dict, download_url: str) -> requests.Response:
+    """
+    Trigger the downstream pipeline with asset_id, metadata, and download URL.
+    (Option C payload)
+    """
     payload = {
-        "media_url": gcs_url,
-        "media_type": req.media_type,
-        "getty_metadata": metadata
+        "asset_id": asset_id,
+        "getty_metadata": metadata,
+        "download_url": download_url,
     }
 
-    r = requests.post(START_PIPELINE_URL, json=payload)
-    if r.status_code != 200:
-        print("PIPELINE ERROR:", r.text)
-        raise HTTPException(
-            status_code=500,
-            detail=f"start_pipeline returned error: {r.text}"
-        )
-
-    return {"status": "ok", "pipeline_response": r.json()}
+    resp = requests.post(START_PIPELINE_URL, json=payload)
+    return resp
 
 
-# -----------------------------
-# Debug Token Endpoint
-# -----------------------------
-@app.get("/debug-token")
-def debug_token():
-    try:
-        token = get_getty_access_token()
-        return {
-            "token_received": bool(token),
-            "token_preview": token[:10] + "..." if token else None
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# -----------------------------
-# Health Check
-# -----------------------------
+# -------------------------------------------------------------------
+# Endpoints
+# -------------------------------------------------------------------
 @app.get("/health")
 def health():
     return {"status": "healthy"}
+
+
+@app.get("/debug-getty")
+def debug_getty():
+    """
+    Simple endpoint to verify Getty auth works from this service.
+    """
+    try:
+        token = get_getty_access_token()
+        return {
+            "stage": "getty_auth",
+            "token_received": bool(token),
+            "token_preview": token[:20] + "..." if token else None,
+        }
+    except Exception as e:
+        return {
+            "stage": "getty_auth",
+            "error": str(e),
+        }
+
+
+@app.get("/debug-token")
+def debug_token():
+    """
+    Lightweight 'is the service callable' debug endpoint.
+    (Cloud Run identity token is checked by Cloud Run itself.)
+    """
+    return {"status": "ok", "message": "debug endpoint reachable"}
+
+
+@app.get("/search-and-run", response_model=SearchAndRunResponse)
+def search_and_run(q: str):
+    """
+    Auto-ingest endpoint:
+    1. Search Getty creative videos for query q
+    2. Pick the first result
+    3. Fetch the download URL
+    4. Trigger the enrichment pipeline with asset_id, metadata, and download_url
+    """
+
+    # 1–2. Search Getty and extract first asset
+    try:
+        video = search_getty_videos(q)
+    except HTTPException as http_err:
+        return SearchAndRunResponse(
+            stage="getty_search",
+            query=q,
+            error=http_err.detail,  # type: ignore[arg-type]
+        )
+
+    asset_id = video.get("id")
+    if not asset_id:
+        return SearchAndRunResponse(
+            stage="getty_search",
+            query=q,
+            error="Getty video result missing 'id'",
+        )
+
+    # 3. Fetch download URL
+    try:
+        download_url = get_getty_download_url(asset_id)
+    except HTTPException as http_err:
+        return SearchAndRunResponse(
+            stage="getty_download",
+            query=q,
+            asset_id=asset_id,
+            error=http_err.detail,  # type: ignore[arg-type]
+        )
+
+    # 4. Trigger pipeline
+    try:
+        pipeline_resp = trigger_pipeline(asset_id, video, download_url)
+    except Exception as e:
+        return SearchAndRunResponse(
+            stage="pipeline_trigger",
+            query=q,
+            asset_id=asset_id,
+            error=f"Pipeline request failed: {str(e)}",
+        )
+
+    return SearchAndRunResponse(
+        stage="complete",
+        query=q,
+        asset_id=asset_id,
+        pipeline_status=pipeline_resp.status_code,
+        pipeline_preview=pipeline_resp.text[:500],
+    )
