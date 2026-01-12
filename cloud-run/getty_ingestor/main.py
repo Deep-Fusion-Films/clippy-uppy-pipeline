@@ -21,7 +21,7 @@ _cached_token = None
 class ProcessRequest(BaseModel):
     query: str | None = None
     asset_id: str | None = None
-    media_type: str | None = "image"
+    media_type: str | None = "video"   # default to video
 
 
 # -----------------------------
@@ -53,22 +53,28 @@ def get_getty_access_token():
 
 
 def get_getty_search_results(query: str):
+    """
+    Search Getty Creative Videos (test credentials support this).
+    """
     token = get_getty_access_token()
-    url = "https://api.gettyimages.com/v3/search/images"
+    url = "https://api.gettyimages.com/v3/search/videos/creative"
     headers = {"Authorization": f"Bearer {token}"}
     params = {"phrase": query, "page_size": 1}
 
     r = requests.get(url, headers=headers, params=params)
     r.raise_for_status()
 
-    results = r.json().get("images", [])
+    results = r.json().get("videos", [])
     if not results:
-        raise HTTPException(status_code=404, detail="No Getty results found")
+        raise HTTPException(status_code=404, detail="No Getty video results found")
 
     return results[0]
 
 
 def get_getty_download_url(asset_id: str):
+    """
+    Retrieve the download URL for a Getty video asset.
+    """
     token = get_getty_access_token()
     url = f"https://api.gettyimages.com/v3/downloads/{asset_id}"
     headers = {"Authorization": f"Bearer {token}"}
@@ -77,7 +83,7 @@ def get_getty_download_url(asset_id: str):
     if r.status_code != 200:
         raise HTTPException(
             status_code=400,
-            detail=f"Getty download failed: {r.text}"
+            detail=f"Getty video download failed: {r.text}"
         )
 
     data = r.json()
@@ -86,7 +92,7 @@ def get_getty_download_url(asset_id: str):
     if not download_url:
         raise HTTPException(
             status_code=400,
-            detail=f"Getty did not return a download URL: {data}"
+            detail=f"Getty did not return a video download URL: {data}"
         )
 
     return download_url
