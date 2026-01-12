@@ -5,7 +5,6 @@ from datetime import datetime
 import google.auth.transport.requests
 import google.oauth2.id_token
 import copy
-import base64
 
 app = FastAPI()
 
@@ -30,6 +29,28 @@ def detect_asset_type_from_filename(file_name: str) -> str:
     if ext in [".mp3", ".wav", ".aac"]:
         return "audio"
     return "unknown"
+
+
+# ---------------------------------------------------------
+# GS URL PARSING
+# ---------------------------------------------------------
+def parse_gs_url(gs_url: str) -> tuple[str, str]:
+    """
+    Parse gs://bucket/object into (bucket, object_name)
+    """
+    if not gs_url.startswith("gs://"):
+        raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {gs_url}")
+
+    without_scheme = gs_url[len("gs://") :]  # strip 'gs://'
+    parts = without_scheme.split("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {gs_url}")
+
+    bucket, object_name = parts
+    if not bucket or not object_name:
+        raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {gs_url}")
+
+    return bucket, object_name
 
 
 # ---------------------------------------------------------
@@ -72,19 +93,59 @@ def deep_merge(a: dict, b: dict) -> dict:
 
 
 # ---------------------------------------------------------
-# INPUT NORMALISATION (MULTI‑INPUT)
+# INPUT NORMALISATION (MULTI‑INPUT, OPTION C)
 # ---------------------------------------------------------
 def build_initial_payload(data: dict) -> dict:
     """
-    Supports:
-    - Getty ingestion (media_bytes + media_type + getty_metadata)
-    - GCS ingestion (file_name + bucket)
-    - Direct upload (media_bytes + media_type)
-    - URL ingestion (url)
+    Supports (priority order):
+    1. Getty/GCS ingestion (media_url = gs://..., media_type, getty_metadata)
+    2. Getty ingestion (media_bytes + media_type + getty_metadata, source=getty)
+    3. Direct upload (media_bytes + media_type)
+    4. GCS ingestion (file_name + bucket)
+    5. URL ingestion (url)
+
+    Normalizes into a common internal structure with:
+    - asset_id
+    - source
+    - asset_type
+    - bucket / file_name / paths.raw (where possible)
     """
 
     # -----------------------------------------------------
-    # 1. Getty ingestion (raw bytes + metadata)
+    # 1. Getty / GCS ingestion via media_url (new path)
+    # -----------------------------------------------------
+    if "media_url" in data:
+        media_url = data["media_url"]
+        media_type = data.get("media_type", "unknown")
+        getty_metadata = data.get("getty_metadata", {})
+        source = data.get("source", "getty")
+        asset_id = data.get("asset_id", "getty_asset")
+
+        # Expect media_url to be gs://...
+        bucket, object_name = parse_gs_url(media_url)
+        file_name = object_name  # full path inside bucket
+
+        asset_type = media_type if media_type in ["image", "video", "audio"] else detect_asset_type_from_filename(file_name)
+
+        payload = {
+            "asset_id": asset_id,
+            "source": source,
+            "media_type": media_type,
+            "asset_type": asset_type,
+            "bucket": bucket,
+            "file_name": file_name,
+            "paths": {
+                "raw": media_url
+            }
+        }
+
+        if getty_metadata:
+            payload["getty_metadata"] = getty_metadata
+
+        return payload
+
+    # -----------------------------------------------------
+    # 2. Getty ingestion (raw bytes + metadata)
     # -----------------------------------------------------
     if "media_bytes" in data and data.get("source") == "getty":
         return {
@@ -97,19 +158,19 @@ def build_initial_payload(data: dict) -> dict:
         }
 
     # -----------------------------------------------------
-    # 2. Direct upload (raw bytes)
+    # 3. Direct upload (raw bytes)
     # -----------------------------------------------------
     if "media_bytes" in data and "media_type" in data:
         return {
             "asset_id": data.get("asset_id", "direct_upload"),
-            "source": "upload",
+            "source": data.get("source", "upload"),
             "media_type": data["media_type"],
             "media_bytes": data["media_bytes"],
             "asset_type": data["media_type"],
         }
 
     # -----------------------------------------------------
-    # 3. GCS-based ingestion (existing behavior)
+    # 4. GCS-based ingestion (existing behavior)
     # -----------------------------------------------------
     if "file_name" in data and "bucket" in data:
         file_name = data["file_name"]
@@ -131,19 +192,19 @@ def build_initial_payload(data: dict) -> dict:
         }
 
     # -----------------------------------------------------
-    # 4. URL ingestion (optional)
+    # 5. URL ingestion (optional)
     # -----------------------------------------------------
     if "url" in data:
         return {
             "asset_id": data.get("asset_id", "url_asset"),
-            "source": "url",
+            "source": data.get("source", "url"),
             "url": data["url"],
             "asset_type": "unknown"
         }
 
     raise HTTPException(
         status_code=400,
-        detail="Invalid input: provide media_bytes OR file_name+bucket OR url"
+        detail="Invalid input: provide media_url OR media_bytes OR file_name+bucket OR url"
     )
 
 
@@ -178,7 +239,7 @@ async def run_all(req: Request):
 
     merged = payload
 
-    # Step 1: Transcode (video only, and only if using GCS or URL)
+    # Step 1: Transcode (video only, and only if not using inline media_bytes)
     if asset_type == "video" and "media_bytes" not in payload:
         transcode_json = call_service(TRANSCODE_URL, "transcode", merged)
         merged = deep_merge(merged, transcode_json)
@@ -188,7 +249,7 @@ async def run_all(req: Request):
         transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", merged)
         merged = deep_merge(merged, transcribe_json)
 
-    # Step 3: Sample frames (video only, and only if using GCS or URL)
+    # Step 3: Sample frames (video only, and only if not using inline media_bytes)
     if asset_type == "video" and "media_bytes" not in payload:
         frames_json = call_service(FRAMES_URL, "sample", merged)
         merged = deep_merge(merged, frames_json)
