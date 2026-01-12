@@ -1,6 +1,9 @@
 import os
 import time
+import random
 import requests
+from typing import Optional, Dict, Any
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -14,7 +17,7 @@ GETTY_API_SECRET = os.environ["GETTY_API_SECRET"]
 START_PIPELINE_URL = os.environ["START_PIPELINE_URL"]
 
 # Simple in-memory token cache
-_getty_token_cache: dict | None = None
+_getty_token_cache: Optional[Dict[str, Any]] = None
 
 
 # -------------------------------------------------------------------
@@ -23,10 +26,10 @@ _getty_token_cache: dict | None = None
 class SearchAndRunResponse(BaseModel):
     stage: str
     query: str
-    asset_id: str | None = None
-    pipeline_status: int | None = None
-    pipeline_preview: str | None = None
-    error: str | None = None
+    asset_id: Optional[str] = None
+    pipeline_status: Optional[int] = None
+    pipeline_preview: Optional[str] = None
+    error: Optional[str] = None
 
 
 # -------------------------------------------------------------------
@@ -60,12 +63,16 @@ def get_getty_access_token() -> str:
     }
 
     resp = requests.post(url, data=data, headers=headers)
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Getty auth failed: {resp.text[:500]}",
+        )
 
     body = resp.json()
     access_token = body["access_token"]
 
-    # Getty sometimes returns expires_in as a string → convert safely
+    # Getty may return expires_in as string → convert safely
     expires_in_raw = body.get("expires_in", 3600)
     try:
         expires_in = int(expires_in_raw)
@@ -74,16 +81,16 @@ def get_getty_access_token() -> str:
 
     _getty_token_cache = {
         "access_token": access_token,
-        "expires_at": now + expires_in - 60,
+        "expires_at": now + expires_in - 60,  # renew a bit early
     }
 
     return access_token
 
 
-def search_getty_videos(query: str) -> dict:
+def search_getty_videos_random(query: str, page_size: int = 10) -> Dict[str, Any]:
     """
-    Search Getty Creative Videos and return the first video object.
-    Strong, focused video search for ingestion.
+    Search Getty Creative Videos and return ONE RANDOM video object
+    from up to `page_size` results for the given query.
     """
     token = get_getty_access_token()
     url = "https://api.gettyimages.com/v3/search/videos/creative"
@@ -93,7 +100,7 @@ def search_getty_videos(query: str) -> dict:
     }
     params = {
         "phrase": query,
-        "page_size": 1,
+        "page_size": page_size,
     }
 
     resp = requests.get(url, headers=headers, params=params)
@@ -111,7 +118,8 @@ def search_getty_videos(query: str) -> dict:
             detail=f"No Getty video results found for query '{query}'",
         )
 
-    return videos[0]
+    # Pure random choice among the returned results
+    return random.choice(videos)
 
 
 def get_getty_download_url(asset_id: str) -> str:
@@ -143,7 +151,7 @@ def get_getty_download_url(asset_id: str) -> str:
     return download_url
 
 
-def trigger_pipeline(asset_id: str, metadata: dict, download_url: str) -> requests.Response:
+def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], download_url: str) -> requests.Response:
     """
     Trigger the downstream pipeline with asset_id, metadata, and download URL.
     (Option C payload)
@@ -197,21 +205,22 @@ def debug_token():
 @app.get("/search-and-run", response_model=SearchAndRunResponse)
 def search_and_run(q: str):
     """
-    Auto-ingest endpoint:
-    1. Search Getty creative videos for query q
-    2. Pick the first result
+    Auto-ingest endpoint (pure random selection, fast mode):
+    1. Search Getty creative videos for query q (page_size=10)
+    2. Randomly pick ONE video from the results
     3. Fetch the download URL
     4. Trigger the enrichment pipeline with asset_id, metadata, and download_url
     """
 
-    # 1–2. Search Getty and extract first asset
+    # 1–2. Search Getty and randomly select one asset
     try:
-        video = search_getty_videos(q)
+        video = search_getty_videos_random(q, page_size=10)
     except HTTPException as http_err:
+        # http_err.detail is whatever we set above
         return SearchAndRunResponse(
             stage="getty_search",
             query=q,
-            error=http_err.detail,  # type: ignore[arg-type]
+            error=str(http_err.detail),
         )
 
     asset_id = video.get("id")
@@ -230,7 +239,7 @@ def search_and_run(q: str):
             stage="getty_download",
             query=q,
             asset_id=asset_id,
-            error=http_err.detail,  # type: ignore[arg-type]
+            error=str(http_err.detail),
         )
 
     # 4. Trigger pipeline
