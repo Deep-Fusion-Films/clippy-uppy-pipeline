@@ -66,11 +66,17 @@ def get_getty_access_token() -> str:
     body = resp.json()
     access_token = body["access_token"]
     # Default expiry ~3600s; subtract a bit for safety
-    expires_in = body.get("expires_in", 3600)
-    _getty_token_cache = {
-        "access_token": access_token,
-        "expires_at": now + expires_in - 60,
-    }
+    expires_in_raw = body.get("expires_in", 3600)
+try:
+    expires_in = int(expires_in_raw)
+except Exception:
+    expires_in = 3600  # fallback
+
+_getty_token_cache = {
+    "access_token": access_token,
+    "expires_at": now + expires_in - 60,
+}
+
     return access_token
 
 
