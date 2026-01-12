@@ -81,7 +81,7 @@ def get_getty_access_token() -> str:
 
     _getty_token_cache = {
         "access_token": access_token,
-        "expires_at": now + expires_in - 60,  # renew a bit early
+        "expires_at": now + expires_in - 60,
     }
 
     return access_token
@@ -89,8 +89,7 @@ def get_getty_access_token() -> str:
 
 def search_getty_videos_random(query: str, page_size: int = 10) -> Dict[str, Any]:
     """
-    Search Getty Creative Videos and return ONE RANDOM video object
-    from up to `page_size` results for the given query.
+    Search Getty Creative Videos and return ONE RANDOM video object.
     """
     token = get_getty_access_token()
     url = "https://api.gettyimages.com/v3/search/videos/creative"
@@ -118,37 +117,27 @@ def search_getty_videos_random(query: str, page_size: int = 10) -> Dict[str, Any
             detail=f"No Getty video results found for query '{query}'",
         )
 
-    # Pure random choice among the returned results
     return random.choice(videos)
 
 
-def get_getty_download_url(asset_id: str) -> str:
+def extract_public_mp4(video: Dict[str, Any]) -> str:
     """
-    Retrieve the download URL for a Getty video asset.
+    Extract a public MP4 URL from display_sizes.
+    This bypasses the Getty download entitlement requirement.
     """
-    token = get_getty_access_token()
-    url = f"https://api.gettyimages.com/v3/downloads/{asset_id}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-    }
+    mp4_candidates = [
+        d.get("uri")
+        for d in video.get("display_sizes", [])
+        if isinstance(d.get("uri"), str) and d["uri"].endswith(".mp4")
+    ]
 
-    resp = requests.get(url, headers=headers)
-    if resp.status_code != 200:
+    if not mp4_candidates:
         raise HTTPException(
             status_code=502,
-            detail=f"Getty download lookup failed: {resp.text[:500]}",
+            detail="No MP4 URL found in display_sizes"
         )
 
-    data = resp.json()
-    download_url = data.get("uri")
-    if not download_url:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Getty did not return a download URL: {data}",
-        )
-
-    return download_url
+    return mp4_candidates[0]
 
 
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], download_url: str) -> requests.Response:
@@ -176,9 +165,6 @@ def health():
 
 @app.get("/debug-getty")
 def debug_getty():
-    """
-    Simple endpoint to verify Getty auth works from this service.
-    """
     try:
         token = get_getty_access_token()
         return {
@@ -187,18 +173,11 @@ def debug_getty():
             "token_preview": token[:20] + "..." if token else None,
         }
     except Exception as e:
-        return {
-            "stage": "getty_auth",
-            "error": str(e),
-        }
+        return {"stage": "getty_auth", "error": str(e)}
 
 
 @app.get("/debug-token")
 def debug_token():
-    """
-    Lightweight 'is the service callable' debug endpoint.
-    (Cloud Run identity token is checked by Cloud Run itself.)
-    """
     return {"status": "ok", "message": "debug endpoint reachable"}
 
 
@@ -206,17 +185,16 @@ def debug_token():
 def search_and_run(q: str):
     """
     Auto-ingest endpoint (pure random selection, fast mode):
-    1. Search Getty creative videos for query q (page_size=10)
-    2. Randomly pick ONE video from the results
-    3. Fetch the download URL
-    4. Trigger the enrichment pipeline with asset_id, metadata, and download_url
+    1. Search Getty creative videos
+    2. Randomly pick one
+    3. Extract public MP4 URL from display_sizes
+    4. Trigger pipeline
     """
 
     # 1–2. Search Getty and randomly select one asset
     try:
         video = search_getty_videos_random(q, page_size=10)
     except HTTPException as http_err:
-        # http_err.detail is whatever we set above
         return SearchAndRunResponse(
             stage="getty_search",
             query=q,
@@ -231,12 +209,12 @@ def search_and_run(q: str):
             error="Getty video result missing 'id'",
         )
 
-    # 3. Fetch download URL
+    # 3. Extract MP4 URL from display_sizes
     try:
-        download_url = get_getty_download_url(asset_id)
+        download_url = extract_public_mp4(video)
     except HTTPException as http_err:
         return SearchAndRunResponse(
-            stage="getty_download",
+            stage="mp4_extract",
             query=q,
             asset_id=asset_id,
             error=str(http_err.detail),
