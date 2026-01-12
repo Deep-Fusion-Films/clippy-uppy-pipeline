@@ -40,10 +40,13 @@ def get_getty_access_token() -> str:
     global _getty_token_cache
 
     now = time.time()
+
+    # Use cached token if still valid
     if _getty_token_cache:
         if now < _getty_token_cache["expires_at"]:
             return _getty_token_cache["access_token"]
 
+    # Request new token
     url = "https://api.gettyimages.com/oauth2/token"
     data = {
         "client_id": GETTY_API_KEY,
@@ -57,25 +60,22 @@ def get_getty_access_token() -> str:
     }
 
     resp = requests.post(url, data=data, headers=headers)
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Getty auth failed: {resp.text[:500]}",
-        )
+    resp.raise_for_status()
 
     body = resp.json()
     access_token = body["access_token"]
-    # Default expiry ~3600s; subtract a bit for safety
-    expires_in_raw = body.get("expires_in", 3600)
-try:
-    expires_in = int(expires_in_raw)
-except Exception:
-    expires_in = 3600  # fallback
 
-_getty_token_cache = {
-    "access_token": access_token,
-    "expires_at": now + expires_in - 60,
-}
+    # Getty sometimes returns expires_in as a string → convert safely
+    expires_in_raw = body.get("expires_in", 3600)
+    try:
+        expires_in = int(expires_in_raw)
+    except Exception:
+        expires_in = 3600
+
+    _getty_token_cache = {
+        "access_token": access_token,
+        "expires_at": now + expires_in - 60,
+    }
 
     return access_token
 
