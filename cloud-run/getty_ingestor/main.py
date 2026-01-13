@@ -85,7 +85,6 @@ def search_creative_videos(query: str) -> Dict[str, Any]:
 
     params = {
         "phrase": query,
-        "asset_family": "creative",
         "fields": "id,title,caption,display_sizes",
         "page_size": 50,
         "sort_order": "best_match",
@@ -102,10 +101,9 @@ def search_creative_videos(query: str) -> Dict[str, Any]:
     if not videos:
         raise HTTPException(
             status_code=404,
-            detail=f"No Creative videos found for '{query}'",
+            detail=f"No videos found for '{query}'",
         )
 
-    # Filter for assets with at least one MP4 preview
     preview_enabled = [
         v for v in videos
         if any(
@@ -117,11 +115,10 @@ def search_creative_videos(query: str) -> Dict[str, Any]:
     if not preview_enabled:
         raise HTTPException(
             status_code=404,
-            detail=f"No preview-enabled Creative assets found for '{query}'",
+            detail=f"No preview-enabled assets found for '{query}'",
         )
 
     return random.choice(preview_enabled)
-
 
 # -------------------------------------------------------------------
 # Attempt Licensed Download (Strict Mode)
