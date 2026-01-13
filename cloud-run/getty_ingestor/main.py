@@ -10,7 +10,7 @@ from pydantic import BaseModel
 app = FastAPI()
 
 # -------------------------------------------------------------------
-# Configuration
+# Environment Variables
 # -------------------------------------------------------------------
 GETTY_API_KEY = os.environ["GETTY_API_KEY"]
 GETTY_API_SECRET = os.environ["GETTY_API_SECRET"]
@@ -21,7 +21,7 @@ _token_cache: Optional[Dict[str, Any]] = None
 
 
 # -------------------------------------------------------------------
-# Models
+# Response Model
 # -------------------------------------------------------------------
 class SearchAndRunResponse(BaseModel):
     stage: str
@@ -30,10 +30,12 @@ class SearchAndRunResponse(BaseModel):
     pipeline_status: Optional[int] = None
     pipeline_preview: Optional[str] = None
     error: Optional[str] = None
+    download_attempt_status: Optional[int] = None
+    download_attempt_body: Optional[str] = None
 
 
 # -------------------------------------------------------------------
-# Getty OAuth (still required for your account)
+# OAuth Token
 # -------------------------------------------------------------------
 def get_getty_access_token() -> str:
     global _token_cache
@@ -42,22 +44,19 @@ def get_getty_access_token() -> str:
     if _token_cache and now < _token_cache["expires_at"]:
         return _token_cache["access_token"]
 
-    url = "https://api.gettyimages.com/oauth2/token"
+    url = "https://authentication.gettyimages.com/oauth2/token"
     data = {
         "client_id": GETTY_API_KEY,
         "client_secret": GETTY_API_SECRET,
         "grant_type": "client_credentials",
     }
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
     resp = requests.post(url, data=data, headers=headers)
     if resp.status_code != 200:
         raise HTTPException(
             status_code=502,
-            detail=f"Getty auth failed: {resp.text[:500]}",
+            detail=f"Getty OAuth failed: {resp.text[:500]}",
         )
 
     body = resp.json()
@@ -73,15 +72,10 @@ def get_getty_access_token() -> str:
 
 
 # -------------------------------------------------------------------
-# Creative Video Search (OAuth + Api-Key)
+# Search Creative Videos (Core Video API)
 # -------------------------------------------------------------------
-def search_getty_videos_random(
-    query: str,
-    pages: int = 5,
-    page_size: int = 30,
-) -> Dict[str, Any]:
-
-    url = "https://api.gettyimages.com/v3/search/videos/creative"
+def search_creative_videos(query: str) -> Dict[str, Any]:
+    url = "https://api.gettyimages.com/v3/search/videos"
 
     headers = {
         "Api-Key": GETTY_API_KEY,
@@ -89,74 +83,83 @@ def search_getty_videos_random(
         "Accept": "application/json",
     }
 
-    base_params = {
+    params = {
         "phrase": query,
-        "fields": (
-            "id,title,caption,display_sizes,collection_code,collection_name,"
-            "license_model,asset_family,product_types"
-        ),
+        "asset_family": "creative",
+        "fields": "id,title,caption,display_sizes",
+        "page_size": 50,
         "sort_order": "best_match",
-        "exclude_nudity": "true",
     }
 
-    valid_assets: List[Dict[str, Any]] = []
+    resp = requests.get(url, headers=headers, params=params)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Getty search failed: {resp.text[:500]}",
+        )
 
-    for page in range(1, pages + 1):
-        params = {**base_params, "page": page, "page_size": page_size}
-        resp = requests.get(url, headers=headers, params=params)
+    videos = resp.json().get("videos", [])
+    if not videos:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No Creative videos found for '{query}'",
+        )
 
-        if resp.status_code != 200:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Getty search failed on page {page}: {resp.text[:500]}",
-            )
+    # Filter for assets with at least one MP4 preview
+    preview_enabled = [
+        v for v in videos
+        if any(
+            isinstance(d.get("uri"), str) and d["uri"].endswith(".mp4")
+            for d in v.get("display_sizes", [])
+        )
+    ]
 
-        data = resp.json()
-        videos = data.get("videos", [])
-        if not videos:
-            continue
-
-        # Only accept assets with preview MP4s
-        for v in videos:
-            if any(
-                isinstance(d.get("uri"), str) and d["uri"].endswith(".mp4")
-                for d in v.get("display_sizes", [])
-            ):
-                valid_assets.append(v)
-
-        if valid_assets:
-            break
-
-    if not valid_assets:
+    if not preview_enabled:
         raise HTTPException(
             status_code=404,
             detail=f"No preview-enabled Creative assets found for '{query}'",
         )
 
-    return random.choice(valid_assets)
+    return random.choice(preview_enabled)
 
 
 # -------------------------------------------------------------------
-# Extract Preview MP4 (your only download path)
+# Attempt Licensed Download (Strict Mode)
+# -------------------------------------------------------------------
+def attempt_licensed_download(asset_id: str) -> Dict[str, Any]:
+    url = f"https://api.gettyimages.com/v3/downloads/videos/{asset_id}"
+
+    headers = {
+        "Api-Key": GETTY_API_KEY,
+        "Authorization": f"Bearer {get_getty_access_token()}",
+        "Accept": "application/json",
+    }
+
+    resp = requests.post(url, headers=headers)
+
+    return {
+        "status": resp.status_code,
+        "body": resp.text[:500],
+    }
+
+
+# -------------------------------------------------------------------
+# Extract Preview MP4 (P2: first MP4 returned)
 # -------------------------------------------------------------------
 def extract_preview_mp4(video: Dict[str, Any]) -> str:
-    mp4s = [
-        d["uri"]
-        for d in video.get("display_sizes", [])
-        if isinstance(d.get("uri"), str) and d["uri"].endswith(".mp4")
-    ]
+    for d in video.get("display_sizes", []):
+        uri = d.get("uri")
+        if isinstance(uri, str) and uri.endswith(".mp4"):
+            return uri
 
-    if not mp4s:
-        raise HTTPException(
-            status_code=502,
-            detail="No preview MP4 found in display_sizes",
-        )
-
-    return mp4s[0]
+    raise HTTPException(
+        status_code=502,
+        detail="No MP4 preview found in display_sizes",
+    )
 
 
 # -------------------------------------------------------------------
-# Pipeline Trigger
+# Trigger Pipeline
 # -------------------------------------------------------------------
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], download_url: str):
     payload = {
@@ -175,37 +178,12 @@ def health():
     return {"status": "healthy"}
 
 
-@app.get("/debug-getty")
-def debug_getty():
-    try:
-        token = get_getty_access_token()
-        return {"token_preview": token[:20] + "..."}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/debug-raw")
-def debug_raw(q: str):
-    url = "https://api.gettyimages.com/v3/search/videos/creative"
-    headers = {
-        "Api-Key": GETTY_API_KEY,
-        "Authorization": f"Bearer {get_getty_access_token()}",
-        "Accept": "application/json",
-    }
-    params = {"phrase": q, "page_size": 1}
-    resp = requests.get(url, headers=headers, params=params)
-    try:
-        return resp.json()
-    except:
-        return {"status": resp.status_code, "body": resp.text[:500]}
-
-
 @app.get("/search-and-run", response_model=SearchAndRunResponse)
 def search_and_run(q: str):
 
     # 1. Search Creative
     try:
-        video = search_getty_videos_random(q, page_size=10)
+        video = search_creative_videos(q)
     except HTTPException as http_err:
         return SearchAndRunResponse(
             stage="getty_search",
@@ -214,32 +192,33 @@ def search_and_run(q: str):
         )
 
     asset_id = video.get("id")
-    if not asset_id:
-        return SearchAndRunResponse(
-            stage="getty_search",
-            query=q,
-            error="Missing asset ID",
-        )
 
-    # 2. Extract preview MP4
+    # 2. Attempt licensed download (Strict Mode)
+    download_attempt = attempt_licensed_download(asset_id)
+
+    # 3. Fallback to preview MP4 (P2)
     try:
-        download_url = extract_preview_mp4(video)
+        preview_url = extract_preview_mp4(video)
     except HTTPException as http_err:
         return SearchAndRunResponse(
             stage="preview_extract",
             query=q,
             asset_id=asset_id,
+            download_attempt_status=download_attempt["status"],
+            download_attempt_body=download_attempt["body"],
             error=str(http_err.detail),
         )
 
-    # 3. Trigger pipeline
+    # 4. Trigger pipeline
     try:
-        pipeline_resp = trigger_pipeline(asset_id, video, download_url)
+        pipeline_resp = trigger_pipeline(asset_id, video, preview_url)
     except Exception as e:
         return SearchAndRunResponse(
             stage="pipeline_trigger",
             query=q,
             asset_id=asset_id,
+            download_attempt_status=download_attempt["status"],
+            download_attempt_body=download_attempt["body"],
             error=str(e),
         )
 
@@ -249,5 +228,6 @@ def search_and_run(q: str):
         asset_id=asset_id,
         pipeline_status=pipeline_resp.status_code,
         pipeline_preview=pipeline_resp.text[:500],
+        download_attempt_status=download_attempt["status"],
+        download_attempt_body=download_attempt["body"],
     )
-
