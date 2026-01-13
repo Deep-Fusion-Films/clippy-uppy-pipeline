@@ -242,6 +242,11 @@ def debug_raw(q: str):
     except Exception:
         return {"error": "Non-JSON response", "status": resp.status_code, "body": resp.text[:500]}
 
+@app.get("/debug-search-run")
+def debug_search_run(q: str):
+    result = search_getty_videos_random(q, pages=5, page_size=30)
+    return result
+
 @app.get("/search-and-run", response_model=SearchAndRunResponse)
 def search_and_run(q: str):
     """
