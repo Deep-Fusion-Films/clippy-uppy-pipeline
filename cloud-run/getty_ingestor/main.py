@@ -90,14 +90,14 @@ def get_getty_access_token() -> str:
 # -------------------------------------------------------------------
 # Getty Search (corrected)
 # -------------------------------------------------------------------
-def search_getty_videos_random(query: str, page_size: int = 10) -> Dict[str, Any]:
+def search_getty_videos_random(query: str, page_size: int = 30) -> Dict[str, Any]:
     """
-    Search Getty Creative Videos and return ONE RANDOM video object.
-    Uses Api-Key only (no OAuth) because OAuth suppresses MP4 previews.
+    Search Getty Creative Videos, filter for assets that contain MP4 previews,
+    and return ONE RANDOM valid video object with full metadata.
     """
     url = "https://api.gettyimages.com/v3/search/videos/creative"
 
-    # ⭐ FIX: Api-Key only — this returns MP4 previews
+    # Api-Key only → ensures MP4 previews are included
     headers = {
         "Api-Key": GETTY_API_KEY,
         "Accept": "application/json",
@@ -123,7 +123,24 @@ def search_getty_videos_random(query: str, page_size: int = 10) -> Dict[str, Any
             detail=f"No Getty video results found for query '{query}'",
         )
 
-    return random.choice(videos)
+    # ⭐ Filter for assets that contain at least one MP4 preview
+    valid_assets = []
+    for v in videos:
+        display_sizes = v.get("display_sizes", [])
+        if any(
+            isinstance(d.get("uri"), str) and d["uri"].endswith(".mp4")
+            for d in display_sizes
+        ):
+            valid_assets.append(v)
+
+    if not valid_assets:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No MP4-enabled Getty assets found for query '{query}'",
+        )
+
+    # ⭐ Randomly pick from MP4-enabled assets only
+    return random.choice(valid_assets)
 
 
 # -------------------------------------------------------------------
