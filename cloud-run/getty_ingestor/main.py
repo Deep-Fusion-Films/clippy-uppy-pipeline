@@ -118,7 +118,7 @@ def search_getty_videos_random(
             "id,title,caption,display_sizes,collection_code,collection_name,"
             "license_model,asset_family,product_types"
         ),
-        "product_types": "easyaccess,royaltyfree",
+        "product_types": "easyaccess",
         "sort_order": "best_match",
         "exclude_nudity": "true",
     }
