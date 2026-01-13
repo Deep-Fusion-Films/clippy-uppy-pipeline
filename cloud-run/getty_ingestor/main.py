@@ -90,10 +90,13 @@ def get_getty_access_token() -> str:
 # -------------------------------------------------------------------
 # Getty Search (corrected)
 # -------------------------------------------------------------------
-def search_getty_videos_random(query: str, page_size: int = 30) -> Dict[str, Any]:
+def search_getty_videos_random(query: str, pages: int = 5, page_size: int = 30) -> Dict[str, Any]:
     """
-    Search Getty Creative Videos, filter for assets that contain MP4 previews,
+    Search multiple pages of Getty Creative Videos, filter for assets that contain MP4 previews,
     and return ONE RANDOM valid video object with full metadata.
+
+    - pages: how many pages to fetch (default 5)
+    - page_size: how many results per page (default 30)
     """
     url = "https://api.gettyimages.com/v3/search/videos/creative"
 
@@ -103,45 +106,48 @@ def search_getty_videos_random(query: str, page_size: int = 30) -> Dict[str, Any
         "Accept": "application/json",
     }
 
-    params = {
-        "phrase": query,
-        "page_size": page_size,
-    }
-
-    resp = requests.get(url, headers=headers, params=params)
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Getty search failed: {resp.text[:500]}",
-        )
-
-    data = resp.json()
-    videos = data.get("videos", [])
-    if not videos:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No Getty video results found for query '{query}'",
-        )
-
-    # ⭐ Filter for assets that contain at least one MP4 preview
     valid_assets = []
-    for v in videos:
-        display_sizes = v.get("display_sizes", [])
-        if any(
-            isinstance(d.get("uri"), str) and d["uri"].endswith(".mp4")
-            for d in display_sizes
-        ):
-            valid_assets.append(v)
+
+    for page in range(1, pages + 1):
+        params = {
+            "phrase": query,
+            "page": page,
+            "page_size": page_size,
+        }
+
+        resp = requests.get(url, headers=headers, params=params)
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Getty search failed on page {page}: {resp.text[:500]}",
+            )
+
+        data = resp.json()
+        videos = data.get("videos", [])
+        if not videos:
+            continue  # empty page, skip
+
+        # Filter for assets that contain at least one MP4 preview
+        for v in videos:
+            display_sizes = v.get("display_sizes", [])
+            if any(
+                isinstance(d.get("uri"), str) and d["uri"].endswith(".mp4")
+                for d in display_sizes
+            ):
+                valid_assets.append(v)
+
+        # If we already have valid assets, no need to fetch more pages
+        if valid_assets:
+            break
 
     if not valid_assets:
         raise HTTPException(
             status_code=404,
-            detail=f"No MP4-enabled Getty assets found for query '{query}'",
+            detail=f"No MP4-enabled Getty assets found for query '{query}' across {pages} pages",
         )
 
-    # ⭐ Randomly pick from MP4-enabled assets only
+    # Randomly pick from MP4-enabled assets only
     return random.choice(valid_assets)
-
 
 # -------------------------------------------------------------------
 # MP4 extraction
