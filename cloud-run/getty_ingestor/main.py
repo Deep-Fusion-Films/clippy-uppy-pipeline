@@ -1,9 +1,9 @@
 import os
 import time
 import random
-import requests
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
+import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -33,7 +33,7 @@ class SearchAndRunResponse(BaseModel):
 
 
 # -------------------------------------------------------------------
-# Getty OAuth (kept for future use)
+# Getty OAuth
 # -------------------------------------------------------------------
 def get_getty_access_token() -> str:
     """
@@ -81,22 +81,22 @@ def get_getty_access_token() -> str:
 
     _getty_token_cache = {
         "access_token": access_token,
-        "expires_at": now + expires_in - 60,
+        "expires_at": now + expires_in - 60,  # refresh 1 min early
     }
 
     return access_token
 
 
 # -------------------------------------------------------------------
-# Getty Search (corrected)
+# Getty Search (Creative Video)
 # -------------------------------------------------------------------
 def search_getty_videos_random(
     query: str,
     pages: int = 5,
-    page_size: int = 30
+    page_size: int = 30,
 ) -> Dict[str, Any]:
     """
-    Improved Getty Creative Video search:
+    Getty Creative Video search:
     - Uses fields to force Getty to return display_sizes (including MP4s)
     - Uses product_types and sort_order to stabilize results
     - Searches multiple pages
@@ -111,17 +111,19 @@ def search_getty_videos_random(
         "Accept": "application/json",
     }
 
-    # ⭐ These filters dramatically improve MP4 consistency
+    # NOTE: minimum_size is NOT valid for video → removed
     base_params = {
         "phrase": query,
-        "fields": "id,title,caption,display_sizes,collection_code,collection_name,license_model,asset_family",
+        "fields": (
+            "id,title,caption,display_sizes,collection_code,collection_name,"
+            "license_model,asset_family,product_types"
+        ),
         "product_types": "easyaccess,royaltyfree",
         "sort_order": "best_match",
         "exclude_nudity": "true",
-        "minimum_size": "small",
     }
 
-    valid_assets = []
+    valid_assets: List[Dict[str, Any]] = []
 
     for page in range(1, pages + 1):
         params = {
@@ -142,7 +144,7 @@ def search_getty_videos_random(
         if not videos:
             continue
 
-        # ⭐ Filter for assets that contain at least one MP4 preview
+        # Filter for assets that contain at least one MP4 preview
         for v in videos:
             display_sizes = v.get("display_sizes", [])
             if any(
@@ -163,13 +165,14 @@ def search_getty_videos_random(
 
     return random.choice(valid_assets)
 
+
 # -------------------------------------------------------------------
-# MP4 extraction
+# Preview MP4 extraction (fallback path)
 # -------------------------------------------------------------------
 def extract_public_mp4(video: Dict[str, Any]) -> str:
     """
     Extract a public MP4 URL from display_sizes.
-    This bypasses the Getty download entitlement requirement.
+    This uses preview MP4s and does NOT require OAuth/download entitlement.
     """
     mp4_candidates = [
         d.get("uri")
@@ -180,10 +183,96 @@ def extract_public_mp4(video: Dict[str, Any]) -> str:
     if not mp4_candidates:
         raise HTTPException(
             status_code=502,
-            detail="No MP4 URL found in display_sizes"
+            detail="No MP4 URL found in display_sizes",
         )
 
     return mp4_candidates[0]
+
+
+# -------------------------------------------------------------------
+# Licensed download (primary path)
+# -------------------------------------------------------------------
+def get_licensed_download_url(asset_id: str, token: str) -> str:
+    """
+    Request a licensed download URL for a video asset via Getty downloads API.
+    Requires a valid OAuth token and appropriate license agreement.
+    """
+    url = f"https://api.gettyimages.com/v3/downloads/videos/{asset_id}"
+    headers = {
+        "Api-Key": GETTY_API_KEY,
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    params = {
+        "auto_download": "false",
+        "product_type": "easyaccess",
+    }
+
+    resp = requests.post(url, headers=headers, params=params)
+
+    if resp.status_code != 200:
+        # Try to parse structured error to detect NoAgreement
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+
+        if body and body.get("ErrorCode") == "NoAgreement":
+            # Signal to caller that this is a licensing issue, not a technical failure
+            raise HTTPException(
+                status_code=409,
+                detail=f"Getty download NoAgreement for asset {asset_id}: {resp.text[:500]}",
+            )
+
+        # Generic failure
+        raise HTTPException(
+            status_code=502,
+            detail=f"Getty download failed for asset {asset_id}: {resp.text[:500]}",
+        )
+
+    body = resp.json()
+    download = body.get("download")
+    if not isinstance(download, dict) or "uri" not in download:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Getty download response missing 'download.uri' for asset {asset_id}: {resp.text[:500]}",
+        )
+
+    return download["uri"]
+
+
+# -------------------------------------------------------------------
+# Hybrid download selection
+# -------------------------------------------------------------------
+def resolve_download_url_hybrid(video: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Hybrid strategy:
+    1. Try to get licensed download URL via OAuth/downloads endpoint.
+    2. If Getty returns NoAgreement, fall back to preview MP4 in display_sizes.
+    Returns (download_url, source) where source is 'licensed' or 'preview'.
+    """
+    asset_id = video.get("id")
+    if not asset_id:
+        raise HTTPException(
+            status_code=502,
+            detail="Getty video result missing 'id' during download resolution",
+        )
+
+    # First, attempt licensed download
+    try:
+        token = get_getty_access_token()
+        licensed_url = get_licensed_download_url(asset_id, token)
+        return licensed_url, "licensed"
+    except HTTPException as e:
+        detail = str(e.detail)
+        # NoAgreement → fall back to preview MP4
+        if "NoAgreement" in detail or "ErrorCode\":\"NoAgreement\"" in detail:
+            # Fall back to preview MP4
+            preview_url = extract_public_mp4(video)
+            return preview_url, "preview"
+
+        # Other errors are treated as hard failures
+        raise
 
 
 # -------------------------------------------------------------------
@@ -192,7 +281,6 @@ def extract_public_mp4(video: Dict[str, Any]) -> str:
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], download_url: str) -> requests.Response:
     """
     Trigger the downstream pipeline with asset_id, metadata, and download URL.
-    (Option C payload)
     """
     payload = {
         "asset_id": asset_id,
@@ -229,6 +317,7 @@ def debug_getty():
 def debug_token():
     return {"status": "ok", "message": "debug endpoint reachable"}
 
+
 @app.get("/debug-raw")
 def debug_raw(q: str):
     """
@@ -237,7 +326,6 @@ def debug_raw(q: str):
     """
     url = "https://api.gettyimages.com/v3/search/videos/creative"
 
-    # Use Api-Key only (this is the correct header for preview MP4s)
     headers = {
         "Api-Key": GETTY_API_KEY,
         "Accept": "application/json",
@@ -250,25 +338,34 @@ def debug_raw(q: str):
 
     resp = requests.get(url, headers=headers, params=params)
 
-    # Return the raw JSON so we can inspect display_sizes
     try:
         return resp.json()
     except Exception:
-        return {"error": "Non-JSON response", "status": resp.status_code, "body": resp.text[:500]}
+        return {
+            "error": "Non-JSON response",
+            "status": resp.status_code,
+            "body": resp.text[:500],
+        }
+
 
 @app.get("/debug-search-run")
 def debug_search_run(q: str):
+    """
+    Debug endpoint that runs the search and returns the raw chosen video object.
+    """
     result = search_getty_videos_random(q, pages=5, page_size=30)
     return result
+
 
 @app.get("/search-and-run", response_model=SearchAndRunResponse)
 def search_and_run(q: str):
     """
-    Auto-ingest endpoint (pure random selection, fast mode):
+    Auto-ingest endpoint (hybrid mode):
     1. Search Getty creative videos
-    2. Randomly pick one
-    3. Extract public MP4 URL from display_sizes
-    4. Trigger pipeline
+    2. Randomly pick one MP4-capable asset
+    3. Try licensed download URL via OAuth
+    4. If NoAgreement, fall back to preview MP4
+    5. Trigger pipeline with chosen URL
     """
 
     # 1–2. Search Getty and randomly select one asset
@@ -289,18 +386,18 @@ def search_and_run(q: str):
             error="Getty video result missing 'id'",
         )
 
-    # 3. Extract MP4 URL from display_sizes
+    # 3–4. Resolve download URL using hybrid strategy
     try:
-        download_url = extract_public_mp4(video)
+        download_url, source = resolve_download_url_hybrid(video)
     except HTTPException as http_err:
         return SearchAndRunResponse(
-            stage="mp4_extract",
+            stage="download_resolve",
             query=q,
             asset_id=asset_id,
             error=str(http_err.detail),
         )
 
-    # 4. Trigger pipeline
+    # 5. Trigger pipeline
     try:
         pipeline_resp = trigger_pipeline(asset_id, video, download_url)
     except Exception as e:
@@ -311,6 +408,7 @@ def search_and_run(q: str):
             error=f"Pipeline request failed: {str(e)}",
         )
 
+    # Note: we don't expose source in the response model, but it’s available in logs if you add logging
     return SearchAndRunResponse(
         stage="complete",
         query=q,
