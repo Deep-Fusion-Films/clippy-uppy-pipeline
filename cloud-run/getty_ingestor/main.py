@@ -1,5 +1,3 @@
-# main.py
-
 import os
 import time
 import random
@@ -35,7 +33,7 @@ class SearchAndRunResponse(BaseModel):
 
 
 # -------------------------------------------------------------------
-# Getty helpers
+# Getty OAuth (kept for future use)
 # -------------------------------------------------------------------
 def get_getty_access_token() -> str:
     """
@@ -89,16 +87,18 @@ def get_getty_access_token() -> str:
     return access_token
 
 
+# -------------------------------------------------------------------
+# Getty Search (corrected)
+# -------------------------------------------------------------------
 def search_getty_videos_random(query: str, page_size: int = 10) -> Dict[str, Any]:
     """
     Search Getty Creative Videos and return ONE RANDOM video object.
+    Uses Api-Key only (no OAuth) because OAuth suppresses MP4 previews.
     """
-    token = get_getty_access_token()
     url = "https://api.gettyimages.com/v3/search/videos/creative"
 
-    # ⭐ REQUIRED FIX: Add Api-Key header
+    # ⭐ FIX: Api-Key only — this returns MP4 previews
     headers = {
-        "Authorization": f"Bearer {token}",
         "Api-Key": GETTY_API_KEY,
         "Accept": "application/json",
     }
@@ -126,6 +126,9 @@ def search_getty_videos_random(query: str, page_size: int = 10) -> Dict[str, Any
     return random.choice(videos)
 
 
+# -------------------------------------------------------------------
+# MP4 extraction
+# -------------------------------------------------------------------
 def extract_public_mp4(video: Dict[str, Any]) -> str:
     """
     Extract a public MP4 URL from display_sizes.
@@ -146,6 +149,9 @@ def extract_public_mp4(video: Dict[str, Any]) -> str:
     return mp4_candidates[0]
 
 
+# -------------------------------------------------------------------
+# Pipeline trigger
+# -------------------------------------------------------------------
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], download_url: str) -> requests.Response:
     """
     Trigger the downstream pipeline with asset_id, metadata, and download URL.
