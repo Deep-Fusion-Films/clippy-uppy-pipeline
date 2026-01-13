@@ -1,3 +1,5 @@
+# main.py
+
 import os
 import time
 import random
@@ -93,10 +95,14 @@ def search_getty_videos_random(query: str, page_size: int = 10) -> Dict[str, Any
     """
     token = get_getty_access_token()
     url = "https://api.gettyimages.com/v3/search/videos/creative"
+
+    # ⭐ REQUIRED FIX: Add Api-Key header
     headers = {
         "Authorization": f"Bearer {token}",
+        "Api-Key": GETTY_API_KEY,
         "Accept": "application/json",
     }
+
     params = {
         "phrase": query,
         "page_size": page_size,
