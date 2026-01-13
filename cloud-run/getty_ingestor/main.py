@@ -90,27 +90,42 @@ def get_getty_access_token() -> str:
 # -------------------------------------------------------------------
 # Getty Search (corrected)
 # -------------------------------------------------------------------
-def search_getty_videos_random(query: str, pages: int = 5, page_size: int = 30) -> Dict[str, Any]:
+def search_getty_videos_random(
+    query: str,
+    pages: int = 5,
+    page_size: int = 30
+) -> Dict[str, Any]:
     """
-    Search multiple pages of Getty Creative Videos, filter for assets that contain MP4 previews,
-    and return ONE RANDOM valid video object with full metadata.
+    Improved Getty Creative Video search:
+    - Uses fields to force Getty to return display_sizes (including MP4s)
+    - Uses product_types and sort_order to stabilize results
+    - Searches multiple pages
+    - Filters for MP4-enabled assets only
+    - Returns one random valid asset with full metadata
+    """
 
-    - pages: how many pages to fetch (default 5)
-    - page_size: how many results per page (default 30)
-    """
     url = "https://api.gettyimages.com/v3/search/videos/creative"
 
-    # Api-Key only → ensures MP4 previews are included
     headers = {
         "Api-Key": GETTY_API_KEY,
         "Accept": "application/json",
+    }
+
+    # ⭐ These filters dramatically improve MP4 consistency
+    base_params = {
+        "phrase": query,
+        "fields": "id,title,caption,display_sizes,collection_code,collection_name,license_model,asset_family",
+        "product_types": "easyaccess,royaltyfree",
+        "sort_order": "best_match",
+        "exclude_nudity": "true",
+        "minimum_size": "small",
     }
 
     valid_assets = []
 
     for page in range(1, pages + 1):
         params = {
-            "phrase": query,
+            **base_params,
             "page": page,
             "page_size": page_size,
         }
@@ -125,9 +140,9 @@ def search_getty_videos_random(query: str, pages: int = 5, page_size: int = 30) 
         data = resp.json()
         videos = data.get("videos", [])
         if not videos:
-            continue  # empty page, skip
+            continue
 
-        # Filter for assets that contain at least one MP4 preview
+        # ⭐ Filter for assets that contain at least one MP4 preview
         for v in videos:
             display_sizes = v.get("display_sizes", [])
             if any(
@@ -136,7 +151,7 @@ def search_getty_videos_random(query: str, pages: int = 5, page_size: int = 30) 
             ):
                 valid_assets.append(v)
 
-        # If we already have valid assets, no need to fetch more pages
+        # Early exit if we found valid assets
         if valid_assets:
             break
 
@@ -146,7 +161,6 @@ def search_getty_videos_random(query: str, pages: int = 5, page_size: int = 30) 
             detail=f"No MP4-enabled Getty assets found for query '{query}' across {pages} pages",
         )
 
-    # Randomly pick from MP4-enabled assets only
     return random.choice(valid_assets)
 
 # -------------------------------------------------------------------
