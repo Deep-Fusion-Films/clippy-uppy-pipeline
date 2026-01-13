@@ -192,6 +192,32 @@ def debug_getty():
 def debug_token():
     return {"status": "ok", "message": "debug endpoint reachable"}
 
+@app.get("/debug-raw")
+def debug_raw(q: str):
+    """
+    Return the raw Getty JSON response exactly as Cloud Run sees it.
+    This allows us to compare Cloud Run's response with manual curl tests.
+    """
+    url = "https://api.gettyimages.com/v3/search/videos/creative"
+
+    # Use Api-Key only (this is the correct header for preview MP4s)
+    headers = {
+        "Api-Key": GETTY_API_KEY,
+        "Accept": "application/json",
+    }
+
+    params = {
+        "phrase": q,
+        "page_size": 1,
+    }
+
+    resp = requests.get(url, headers=headers, params=params)
+
+    # Return the raw JSON so we can inspect display_sizes
+    try:
+        return resp.json()
+    except Exception:
+        return {"error": "Non-JSON response", "status": resp.status_code, "body": resp.text[:500]}
 
 @app.get("/search-and-run", response_model=SearchAndRunResponse)
 def search_and_run(q: str):
