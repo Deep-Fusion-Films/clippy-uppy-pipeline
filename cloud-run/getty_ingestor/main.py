@@ -18,7 +18,7 @@ logger = logging.getLogger("getty_ingestor_service")
 
 
 # -------------------------------------------------------------------
-# Settings (Pydantic v2 + Cloud Run safe)
+# Settings (loaded ONLY when needed, not at import time)
 # -------------------------------------------------------------------
 class Settings(BaseSettings):
     getty_api_key: str = Field(..., env="GETTY_API_KEY")
@@ -33,20 +33,22 @@ class Settings(BaseSettings):
 
     model_config = {
         "case_sensitive": True,
-        "extra": "allow"  # Cloud Run injects extra env vars
+        "extra": "allow"
     }
 
 
+# IMPORTANT FIX:
+# Do NOT load Settings() here.
+# Cloud Run env vars are not guaranteed to be visible at import time.
+
+
 def get_settings() -> Settings:
-    # Do NOT wrap this in try/except — we want full validation errors in logs
+    """Load settings ONLY when FastAPI handles a request."""
     return Settings()
 
 
-settings = get_settings()
-
 app = FastAPI(title="Getty Ingestor Service", version="1.0.0")
 
-# OAuth token cache
 _token_cache: Optional[Dict[str, Any]] = None
 
 
@@ -278,7 +280,7 @@ def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings
 # Dependencies
 # -------------------------------------------------------------------
 def get_service_dependencies() -> Settings:
-    return settings
+    return Settings()  # <-- FIX: load settings at request time
 
 
 # -------------------------------------------------------------------
