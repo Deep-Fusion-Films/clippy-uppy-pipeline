@@ -290,6 +290,13 @@ def get_service_dependencies() -> Settings:
 def health():
     return {"status": "healthy"}
 
+@app.get("/debug/env")
+def debug_env(settings: Settings = Depends(get_service_dependencies)):
+    return {
+        "getty_api_key": settings.getty_api_key,
+        "getty_api_secret": settings.getty_api_secret,
+        "start_pipeline_url": settings.start_pipeline_url,
+    }
 
 @app.get("/search-and-run", response_model=SearchAndRunResponse)
 def search_and_run(q: str, settings: Settings = Depends(get_service_dependencies)):
