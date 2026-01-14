@@ -72,55 +72,6 @@ def get_getty_access_token() -> str:
 
 
 # -------------------------------------------------------------------
-# Search Creative Videos (Core Video API)
-# -------------------------------------------------------------------
-def search_creative_videos(query: str) -> Dict[str, Any]:
-    url = "https://api.gettyimages.com/v3/search/videos"
-
-    headers = {
-        "Api-Key": GETTY_API_KEY,
-        "Authorization": f"Bearer {get_getty_access_token()}",
-        "Accept": "application/json",
-    }
-
-    params = {
-        "phrase": query,
-        "fields": "id,title,caption,display_sizes",
-        "page_size": 50,
-        "sort_order": "best_match",
-    }
-
-    resp = requests.get(url, headers=headers, params=params)
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Getty search failed: {resp.text[:500]}",
-        )
-
-    videos = resp.json().get("videos", [])
-    if not videos:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No videos found for '{query}'",
-        )
-
-    preview_enabled = [
-        v for v in videos
-        if any(
-            isinstance(d.get("uri"), str) and d["uri"].endswith(".mp4")
-            for d in v.get("display_sizes", [])
-        )
-    ]
-
-    if not preview_enabled:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No preview-enabled assets found for '{query}'",
-        )
-
-    return random.choice(preview_enabled)
-
-# -------------------------------------------------------------------
 # Attempt Licensed Download (Strict Mode)
 # -------------------------------------------------------------------
 def attempt_licensed_download(asset_id: str) -> Dict[str, Any]:
@@ -143,26 +94,90 @@ def attempt_licensed_download(asset_id: str) -> Dict[str, Any]:
 # -------------------------------------------------------------------
 # Extract Preview MP4 (P2: first MP4 returned)
 # -------------------------------------------------------------------
-def extract_preview_mp4(video: Dict[str, Any]) -> str:
+def extract_preview_mp4(video: Dict[str, Any]) -> Optional[str]:
     for d in video.get("display_sizes", []):
         uri = d.get("uri")
         if isinstance(uri, str) and uri.endswith(".mp4"):
             return uri
+    return None
+
+
+# -------------------------------------------------------------------
+# Search Core Video API in Blocks of 25, Across 5 Pages
+# -------------------------------------------------------------------
+def find_first_usable_asset(query: str) -> Dict[str, Any]:
+    base_url = "https://api.gettyimages.com/v3/search/videos"
+
+    headers = {
+        "Api-Key": GETTY_API_KEY,
+        "Authorization": f"Bearer {get_getty_access_token()}",
+        "Accept": "application/json",
+    }
+
+    for page in range(1, 6):  # Pages 1–5
+        params = {
+            "phrase": query,
+            "fields": "id,title,caption,display_sizes",
+            "page_size": 25,
+            "page": page,
+            "sort_order": "best_match",
+        }
+
+        resp = requests.get(base_url, headers=headers, params=params)
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Getty search failed on page {page}: {resp.text[:500]}",
+            )
+
+        videos = resp.json().get("videos", [])
+        if not videos:
+            continue
+
+        # Evaluate each asset
+        for video in videos:
+            asset_id = video.get("id")
+            if not asset_id:
+                continue
+
+            # 1. Strict Mode: Attempt licensed download
+            download_attempt = attempt_licensed_download(asset_id)
+
+            if download_attempt["status"] == 200:
+                # Licensed download succeeded
+                return {
+                    "asset": video,
+                    "asset_id": asset_id,
+                    "download_attempt": download_attempt,
+                    "download_url": download_attempt["body"],
+                    "preview_url": None,
+                }
+
+            # 2. Fallback: Preview MP4
+            preview_url = extract_preview_mp4(video)
+            if preview_url:
+                return {
+                    "asset": video,
+                    "asset_id": asset_id,
+                    "download_attempt": download_attempt,
+                    "download_url": None,
+                    "preview_url": preview_url,
+                }
 
     raise HTTPException(
-        status_code=502,
-        detail="No MP4 preview found in display_sizes",
+        status_code=404,
+        detail=f"No usable assets (download or preview) found for '{query}' across 5 pages.",
     )
 
 
 # -------------------------------------------------------------------
 # Trigger Pipeline
 # -------------------------------------------------------------------
-def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], download_url: str):
+def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str):
     payload = {
         "asset_id": asset_id,
         "getty_metadata": metadata,
-        "download_url": download_url,
+        "download_url": url,
     }
     return requests.post(START_PIPELINE_URL, json=payload)
 
@@ -177,10 +192,8 @@ def health():
 
 @app.get("/search-and-run", response_model=SearchAndRunResponse)
 def search_and_run(q: str):
-
-    # 1. Search Creative
     try:
-        video = search_creative_videos(q)
+        result = find_first_usable_asset(q)
     except HTTPException as http_err:
         return SearchAndRunResponse(
             stage="getty_search",
@@ -188,27 +201,16 @@ def search_and_run(q: str):
             error=str(http_err.detail),
         )
 
-    asset_id = video.get("id")
+    asset = result["asset"]
+    asset_id = result["asset_id"]
+    download_attempt = result["download_attempt"]
+    download_url = result["download_url"]
+    preview_url = result["preview_url"]
 
-    # 2. Attempt licensed download (Strict Mode)
-    download_attempt = attempt_licensed_download(asset_id)
+    usable_url = download_url or preview_url
 
-    # 3. Fallback to preview MP4 (P2)
     try:
-        preview_url = extract_preview_mp4(video)
-    except HTTPException as http_err:
-        return SearchAndRunResponse(
-            stage="preview_extract",
-            query=q,
-            asset_id=asset_id,
-            download_attempt_status=download_attempt["status"],
-            download_attempt_body=download_attempt["body"],
-            error=str(http_err.detail),
-        )
-
-    # 4. Trigger pipeline
-    try:
-        pipeline_resp = trigger_pipeline(asset_id, video, preview_url)
+        pipeline_resp = trigger_pipeline(asset_id, asset, usable_url)
     except Exception as e:
         return SearchAndRunResponse(
             stage="pipeline_trigger",
@@ -227,4 +229,5 @@ def search_and_run(q: str):
         pipeline_preview=pipeline_resp.text[:500],
         download_attempt_status=download_attempt["status"],
         download_attempt_body=download_attempt["body"],
+    )
     )
