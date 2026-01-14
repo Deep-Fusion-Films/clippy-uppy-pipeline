@@ -230,4 +230,3 @@ def search_and_run(q: str):
         download_attempt_status=download_attempt["status"],
         download_attempt_body=download_attempt["body"],
     )
-    )
