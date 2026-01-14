@@ -5,7 +5,8 @@ from typing import Optional, Dict, Any, List, Tuple
 
 import requests
 from fastapi import FastAPI, HTTPException, Depends
-from pydantic import BaseModel, BaseSettings, Field, AnyHttpUrl
+from pydantic import BaseModel, Field, AnyHttpUrl
+from pydantic_settings import BaseSettings
 
 # -------------------------------------------------------------------
 # Logging configuration
