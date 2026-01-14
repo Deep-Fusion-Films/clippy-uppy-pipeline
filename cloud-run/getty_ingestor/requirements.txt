@@ -2,6 +2,8 @@ fastapi
 uvicorn[standard]
 requests
 pydantic
+pydantic-settings
+
 
 google-auth
 google-auth-oauthlib
