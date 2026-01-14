@@ -1,11 +1,10 @@
-import os
 import time
 import logging
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 
 import requests
 from fastapi import FastAPI, HTTPException, Depends
-from pydantic import BaseModel, Field, AnyHttpUrl
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
 # -------------------------------------------------------------------
@@ -19,12 +18,12 @@ logger = logging.getLogger("getty_ingestor_service")
 
 
 # -------------------------------------------------------------------
-# Settings / Environment
+# Settings / Environment (Pydantic v2-friendly)
 # -------------------------------------------------------------------
 class Settings(BaseSettings):
     getty_api_key: str = Field(..., env="GETTY_API_KEY")
     getty_api_secret: str = Field(..., env="GETTY_API_SECRET")
-    start_pipeline_url: AnyHttpUrl = Field(..., env="START_PIPELINE_URL")
+    start_pipeline_url: str = Field(..., env="START_PIPELINE_URL")
 
     # Tunables
     getty_search_page_size: int = 25
@@ -33,17 +32,25 @@ class Settings(BaseSettings):
     getty_max_retries: int = 3
     getty_backoff_seconds: float = 0.5
 
-    class Config:
-        case_sensitive = True
+    model_config = {
+        "case_sensitive": True
+    }
 
 
 def get_settings() -> Settings:
     try:
-        return Settings()
+        s = Settings()
+        logger.info(
+            "Settings loaded: page_size=%d max_pages=%d timeout=%d",
+            s.getty_search_page_size,
+            s.getty_search_max_pages,
+            s.getty_timeout_seconds,
+        )
+        return s
     except Exception as e:
-        # Fail fast but log clearly; Cloud Run logs will show this
-        logger.error("Failed to load settings from environment: %s", e)
-        raise RuntimeError(f"Invalid or missing environment configuration: {e}")
+        logger.error("Settings validation failed: %s", e)
+        # Let this bubble up so Cloud Run logs show the full Pydantic error
+        raise
 
 
 settings = get_settings()
@@ -200,7 +207,7 @@ def attempt_licensed_download(asset_id: str, settings: Settings) -> Dict[str, An
 # Extract Preview MP4 (P2: first MP4 returned)
 # -------------------------------------------------------------------
 def extract_preview_mp4(video: Dict[str, Any]) -> Optional[str]:
-    display_sizes = video.get("display_sizes", [])
+    display_sizes = video.get("display_sizes", []) or []
     for d in display_sizes:
         uri = d.get("uri")
         if isinstance(uri, str) and uri.lower().endswith(".mp4"):
@@ -337,7 +344,7 @@ def trigger_pipeline(
 
     resp = http_request_with_retry(
         method="POST",
-        url=str(settings.start_pipeline_url),
+        url=settings.start_pipeline_url,
         json_body=payload,
         timeout=settings.getty_timeout_seconds,
         max_retries=settings.getty_max_retries,
@@ -403,7 +410,6 @@ def search_and_run(q: str, settings: Settings = Depends(get_service_dependencies
     usable_url = download_url or preview_url
 
     if not usable_url:
-        # This should not happen given our logic, but guard anyway
         logger.error(
             "No usable URL found for asset_id=%s after selection", asset_id
         )
