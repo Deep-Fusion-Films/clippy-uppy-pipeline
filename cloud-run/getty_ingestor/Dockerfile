@@ -1,7 +1,7 @@
 # Use a slim, secure Python base image
 FROM python:3.11-slim
 
-# Install system dependencies (requests needs SSL, etc.)
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -10,13 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy dependency list first (for caching)
-COPY requirements.txt .
+COPY requirements.txt /app/requirements.txt
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy the application code
-COPY . .
+# Copy ONLY the application code (no hidden files, no stale layers)
+COPY main.py /app/main.py
 
 # Expose FastAPI port
 EXPOSE 8080
