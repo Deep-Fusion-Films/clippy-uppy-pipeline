@@ -109,10 +109,9 @@ steps:
     '--concurrency','30',
     '--cpu','1',
     '--memory','1Gi',
-    '--set-env-vars','GETTY_API_KEY=r94mr4tht9hkpj86b94hag3p',
-    '--set-env-vars','GETTY_API_SECRET=yceVfv9XJAgfWcJLMLj7',
-    '--set-env-vars','START_PIPELINE_URL=https://start-pipeline-863025961248.europe-west1.run.app'
+    '--set-env-vars','GETTY_API_KEY=r94mr4tht9hkpj86b94hag3p,GETTY_API_SECRET=yceVfv9XJAgfWcJLMLj7,START_PIPELINE_URL=https://start-pipeline-863025961248.europe-west1.run.app'
   ]
+
 
 # --- Build & Deploy gemini_enricher (RENAMED) ---
 - name: 'gcr.io/cloud-builders/docker'
