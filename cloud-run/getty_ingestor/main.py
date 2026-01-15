@@ -21,9 +21,9 @@ logger = logging.getLogger("getty_ingestor_service")
 # Settings (loaded ONLY when needed, not at import time)
 # -------------------------------------------------------------------
 class Settings(BaseSettings):
-    getty_api_key: str = Field(..., env="GETTY_API_KEY")
-    getty_api_secret: str = Field(..., env="GETTY_API_SECRET")
-    start_pipeline_url: str = Field(..., env="START_PIPELINE_URL")
+    getty_api_key: str
+    getty_api_secret: str
+    start_pipeline_url: str
 
     getty_search_page_size: int = 25
     getty_search_max_pages: int = 5
@@ -32,11 +32,12 @@ class Settings(BaseSettings):
     getty_backoff_seconds: float = 0.5
 
     model_config = {
-        "case_sensitive": True,
-        "extra": "allow",
         "env_file": None,
         "env_prefix": "",
+        "case_sensitive": True,
+        "extra": "allow",
     }
+
 
 
 
