@@ -33,8 +33,11 @@ class Settings(BaseSettings):
 
     model_config = {
         "case_sensitive": True,
-        "extra": "allow"
+        "extra": "allow",
+        "env_file": None,
+        "env_prefix": "",
     }
+
 
 
 # IMPORTANT FIX:
