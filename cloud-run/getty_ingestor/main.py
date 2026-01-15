@@ -47,9 +47,7 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
-    """Load settings ONLY when FastAPI handles a request."""
     return Settings()
-
 
 app = FastAPI(title="Getty Ingestor Service", version="1.0.0")
 
@@ -279,14 +277,6 @@ def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings
     )
     return resp
 
-
-# -------------------------------------------------------------------
-# Dependencies
-# -------------------------------------------------------------------
-def get_service_dependencies() -> Settings:
-    return Settings()  # <-- FIX: load settings at request time
-
-
 # -------------------------------------------------------------------
 # Endpoints
 # -------------------------------------------------------------------
@@ -300,7 +290,7 @@ def debug_raw():
     return {"env": dict(os.environ)}
 
 @app.get("/debug/env")
-def debug_env(settings: Settings = Depends(get_service_dependencies)):
+def debug_env(settings: Settings = Depends(get_settings)):
     return {
         "getty_api_key": settings.getty_api_key,
         "getty_api_secret": settings.getty_api_secret,
