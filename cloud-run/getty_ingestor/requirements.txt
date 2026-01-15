@@ -3,7 +3,7 @@ uvicorn[standard]
 requests
 pydantic
 pydantic-settings
-
+python-dotenv
 
 google-auth
 google-auth-oauthlib
