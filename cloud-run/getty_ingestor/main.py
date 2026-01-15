@@ -1,10 +1,10 @@
 import time
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 import requests
 from fastapi import FastAPI, HTTPException, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
 # -------------------------------------------------------------------
@@ -18,7 +18,7 @@ logger = logging.getLogger("getty_ingestor_service")
 
 
 # -------------------------------------------------------------------
-# Settings (loaded ONLY when needed, not at import time)
+# Settings (Pydantic v2, Cloud Run compatible)
 # -------------------------------------------------------------------
 class Settings(BaseSettings):
     getty_api_key: str
@@ -39,16 +39,14 @@ class Settings(BaseSettings):
     }
 
 
-
-
-# IMPORTANT FIX:
-# Do NOT load Settings() here.
-# Cloud Run env vars are not guaranteed to be visible at import time.
-
-
 def get_settings() -> Settings:
+    """Load settings at request time (Cloud Run safe)."""
     return Settings()
 
+
+# -------------------------------------------------------------------
+# FastAPI App
+# -------------------------------------------------------------------
 app = FastAPI(title="Getty Ingestor Service", version="1.0.0")
 
 _token_cache: Optional[Dict[str, Any]] = None
@@ -277,6 +275,7 @@ def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings
     )
     return resp
 
+
 # -------------------------------------------------------------------
 # Endpoints
 # -------------------------------------------------------------------
@@ -284,10 +283,6 @@ def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings
 def health():
     return {"status": "healthy"}
 
-@app.get("/debug/raw")
-def debug_raw():
-    import os
-    return {"env": dict(os.environ)}
 
 @app.get("/debug/env")
 def debug_env(settings: Settings = Depends(get_settings)):
@@ -297,8 +292,15 @@ def debug_env(settings: Settings = Depends(get_settings)):
         "start_pipeline_url": settings.start_pipeline_url,
     }
 
+
+@app.get("/debug/raw")
+def debug_raw():
+    import os
+    return {"env": dict(os.environ)}
+
+
 @app.get("/search-and-run", response_model=SearchAndRunResponse)
-def search_and_run(q: str, settings: Settings = Depends(get_service_dependencies)):
+def search_and_run(q: str, settings: Settings = Depends(get_settings)):
 
     try:
         result = find_first_usable_asset(q, settings)
