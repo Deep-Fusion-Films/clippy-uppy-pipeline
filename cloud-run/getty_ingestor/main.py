@@ -293,6 +293,11 @@ def get_service_dependencies() -> Settings:
 def health():
     return {"status": "healthy"}
 
+@app.get("/debug/raw")
+def debug_raw():
+    import os
+    return {"env": dict(os.environ)}
+
 @app.get("/debug/env")
 def debug_env(settings: Settings = Depends(get_service_dependencies)):
     return {
