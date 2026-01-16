@@ -7,6 +7,9 @@ from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
+import google.auth
+import google.auth.transport.requests
+
 # -------------------------------------------------------------------
 # Logging
 # -------------------------------------------------------------------
@@ -40,8 +43,17 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
-    """Load settings at request time (Cloud Run safe)."""
     return Settings()
+
+
+# -------------------------------------------------------------------
+# Cloud Run → Cloud Run ID Token Auth
+# -------------------------------------------------------------------
+def get_id_token(audience: str) -> str:
+    creds, _ = google.auth.default()
+    auth_req = google.auth.transport.requests.Request()
+    creds.refresh(auth_req)
+    return creds.id_token
 
 
 # -------------------------------------------------------------------
@@ -258,12 +270,15 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------
-# Trigger Pipeline
+# Trigger Pipeline (Cloud Run Auth)
 # -------------------------------------------------------------------
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings: Settings):
+    id_token = get_id_token(settings.start_pipeline_url)
+
     resp = http_request_with_retry(
         method="POST",
         url=settings.start_pipeline_url,
+        headers={"Authorization": f"Bearer {id_token}"},
         json_body={
             "asset_id": asset_id,
             "getty_metadata": metadata,
@@ -339,4 +354,3 @@ def search_and_run(q: str, settings: Settings = Depends(get_settings)):
         download_attempt_status=download_attempt["status"],
         download_attempt_body=download_attempt["body"],
     )
-
