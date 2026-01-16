@@ -7,8 +7,9 @@ from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
+from google.auth.transport.requests import Request
+from google.oauth2 import id_token
 import google.auth
-import google.auth.transport.requests
 
 # -------------------------------------------------------------------
 # Logging
@@ -37,7 +38,7 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": None,
         "env_prefix": "",
-        "case_sensitive": False,   # ⭐ FIX: allow GETTY_API_KEY → getty_api_key
+        "case_sensitive": False,   # Allow GETTY_API_KEY → getty_api_key
         "extra": "allow",
     }
 
@@ -51,9 +52,16 @@ def get_settings() -> Settings:
 # -------------------------------------------------------------------
 def get_id_token(audience: str) -> str:
     creds, _ = google.auth.default()
-    auth_req = google.auth.transport.requests.Request()
-    creds.refresh(auth_req)
-    return creds.id_token
+    auth_req = Request()
+
+    # Wrap existing credentials into ID-token-capable credentials
+    target_creds = id_token.IDTokenCredentials.from_credentials(
+        creds,
+        target_audience=audience,
+    )
+
+    target_creds.refresh(auth_req)
+    return target_creds.token
 
 
 # -------------------------------------------------------------------
@@ -273,12 +281,12 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
 # Trigger Pipeline (Cloud Run Auth)
 # -------------------------------------------------------------------
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings: Settings):
-    id_token = get_id_token(settings.start_pipeline_url)
+    id_tok = get_id_token(settings.start_pipeline_url)
 
     resp = http_request_with_retry(
         method="POST",
         url=settings.start_pipeline_url,
-        headers={"Authorization": f"Bearer {id_token}"},
+        headers={"Authorization": f"Bearer {id_tok}"},
         json_body={
             "asset_id": asset_id,
             "getty_metadata": metadata,
