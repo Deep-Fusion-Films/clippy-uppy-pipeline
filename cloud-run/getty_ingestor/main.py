@@ -292,6 +292,10 @@ def debug_env(settings: Settings = Depends(get_settings)):
         "start_pipeline_url": settings.start_pipeline_url,
     }
 
+@app.get("/debug/print")
+def debug_print():
+    import os
+    return dict(os.environ)
 
 @app.get("/debug/raw")
 def debug_raw():
