@@ -46,6 +46,7 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
+    # IMPORTANT: this must be reloaded on every request
     return Settings()
 
 
@@ -201,10 +202,9 @@ def extract_preview_mp4(video: Dict[str, Any]) -> Optional[str]:
 
 
 # -------------------------------------------------------------------
-# GCS Upload Helper (streaming, OOM-safe)
+# GCS Upload Helper (streaming)
 # -------------------------------------------------------------------
 def upload_to_gcs(bucket_name: str, blob_name: str, source_url: str) -> str:
-    # Stream from Getty → GCS without loading whole file into memory
     with requests.get(source_url, stream=True) as resp:
         resp.raise_for_status()
 
@@ -289,7 +289,7 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------
-# Trigger Pipeline (Cloud Run Auth + GCS upload + JSON parsing)
+# Trigger Pipeline
 # -------------------------------------------------------------------
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings: Settings):
 
@@ -316,6 +316,8 @@ def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings
     # Authenticated Cloud Run → Cloud Run call
     id_tok = get_id_token(settings.start_pipeline_url)
 
+    logger.info(f"Calling pipeline URL: {settings.start_pipeline_url}")
+
     resp = http_request_with_retry(
         method="POST",
         url=settings.start_pipeline_url,
@@ -337,18 +339,12 @@ def health():
 
 
 @app.get("/debug/env")
-def debug_env(settings: Settings = Depends(get_settings)):
+def debug_env(settings: Settings = Depends(get_settings, use_cache=False)):
     return {
         "getty_api_key": settings.getty_api_key,
         "getty_api_secret": settings.getty_api_secret,
         "start_pipeline_url": settings.start_pipeline_url,
     }
-
-
-@app.get("/debug/print")
-def debug_print():
-    import os
-    return dict(os.environ)
 
 
 @app.get("/debug/raw")
@@ -358,7 +354,7 @@ def debug_raw():
 
 
 @app.get("/search-and-run", response_model=SearchAndRunResponse)
-def search_and_run(q: str, settings: Settings = Depends(get_settings)):
+def search_and_run(q: str, settings: Settings = Depends(get_settings, use_cache=False)):
 
     try:
         result = find_first_usable_asset(q, settings)
@@ -369,10 +365,8 @@ def search_and_run(q: str, settings: Settings = Depends(get_settings)):
     asset_id = result["asset_id"]
     download_attempt = result["download_attempt"]
 
-    # Extract usable URL (download or preview)
     raw_url = result["download_url"] or result["preview_url"]
 
-    # Parse JSON if needed
     if raw_url and raw_url.strip().startswith("{"):
         try:
             usable_url = json.loads(raw_url)["uri"]
