@@ -1,5 +1,6 @@
 import time
 import logging
+import json
 from typing import Optional, Dict, Any
 
 import requests
@@ -39,7 +40,7 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": None,
         "env_prefix": "",
-        "case_sensitive": False,   # Allow GETTY_API_KEY → getty_api_key
+        "case_sensitive": False,
         "extra": "allow",
     }
 
@@ -49,7 +50,7 @@ def get_settings() -> Settings:
 
 
 # -------------------------------------------------------------------
-# Cloud Run → Cloud Run ID Token Auth (correct method)
+# Cloud Run → Cloud Run ID Token Auth
 # -------------------------------------------------------------------
 def get_id_token(audience: str) -> str:
     creds, _ = google.auth.default()
@@ -200,7 +201,7 @@ def extract_preview_mp4(video: Dict[str, Any]) -> Optional[str]:
 
 
 # -------------------------------------------------------------------
-# GCS Upload Helper (df-films-assets-euw1, Option A)
+# GCS Upload Helper
 # -------------------------------------------------------------------
 def upload_to_gcs(bucket_name: str, blob_name: str, source_url: str) -> str:
     resp = requests.get(source_url, stream=True)
@@ -287,14 +288,22 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------
-# Trigger Pipeline (Cloud Run Auth + GCS upload)
+# Trigger Pipeline (Cloud Run Auth + GCS upload + JSON parsing fix)
 # -------------------------------------------------------------------
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings: Settings):
-    # 1. Upload preview MP4 to GCS (Option A: getty/<asset_id>.mp4)
+
+    # Parse Getty JSON if needed
+    if url.strip().startswith("{"):
+        try:
+            url = json.loads(url)["uri"]
+        except Exception:
+            raise HTTPException(status_code=500, detail="Failed to parse Getty download URL")
+
+    # Upload preview MP4 to GCS
     gcs_blob = f"getty/{asset_id}.mp4"
     gcs_url = upload_to_gcs("df-films-assets-euw1", gcs_blob, url)
 
-    # 2. Build correct payload for pipeline
+    # Build correct payload for pipeline
     payload = {
         "media_url": gcs_url,
         "media_type": "video",
@@ -303,7 +312,7 @@ def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings
         "asset_id": asset_id,
     }
 
-    # 3. Authenticated Cloud Run → Cloud Run call
+    # Authenticated Cloud Run → Cloud Run call
     id_tok = get_id_token(settings.start_pipeline_url)
 
     resp = http_request_with_retry(
@@ -358,7 +367,25 @@ def search_and_run(q: str, settings: Settings = Depends(get_settings)):
     asset = result["asset"]
     asset_id = result["asset_id"]
     download_attempt = result["download_attempt"]
-    usable_url = result["download_url"] or result["preview_url"]
+
+    # Extract usable URL (download or preview)
+    raw_url = result["download_url"] or result["preview_url"]
+
+    # Parse JSON if needed
+    if raw_url and raw_url.strip().startswith("{"):
+        try:
+            usable_url = json.loads(raw_url)["uri"]
+        except Exception:
+            return SearchAndRunResponse(
+                stage="pipeline_trigger",
+                query=q,
+                asset_id=asset_id,
+                download_attempt_status=download_attempt["status"],
+                download_attempt_body=download_attempt["body"],
+                error="Failed to parse Getty download URL",
+            )
+    else:
+        usable_url = raw_url
 
     try:
         pipeline_resp = trigger_pipeline(asset_id, asset, usable_url, settings)
