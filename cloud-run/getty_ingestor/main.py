@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token
 import google.auth
+from google.cloud import storage
 
 # -------------------------------------------------------------------
 # Logging
@@ -199,6 +200,22 @@ def extract_preview_mp4(video: Dict[str, Any]) -> Optional[str]:
 
 
 # -------------------------------------------------------------------
+# GCS Upload Helper (df-films-assets-euw1, Option A)
+# -------------------------------------------------------------------
+def upload_to_gcs(bucket_name: str, blob_name: str, source_url: str) -> str:
+    resp = requests.get(source_url, stream=True)
+    resp.raise_for_status()
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+
+    blob.upload_from_string(resp.content, content_type="video/mp4")
+
+    return f"gs://{bucket_name}/{blob_name}"
+
+
+# -------------------------------------------------------------------
 # Getty Search
 # -------------------------------------------------------------------
 def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
@@ -270,20 +287,30 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------
-# Trigger Pipeline (Cloud Run Auth)
+# Trigger Pipeline (Cloud Run Auth + GCS upload)
 # -------------------------------------------------------------------
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings: Settings):
+    # 1. Upload preview MP4 to GCS (Option A: getty/<asset_id>.mp4)
+    gcs_blob = f"getty/{asset_id}.mp4"
+    gcs_url = upload_to_gcs("df-films-assets-euw1", gcs_blob, url)
+
+    # 2. Build correct payload for pipeline
+    payload = {
+        "media_url": gcs_url,
+        "media_type": "video",
+        "getty_metadata": metadata,
+        "source": "getty",
+        "asset_id": asset_id,
+    }
+
+    # 3. Authenticated Cloud Run → Cloud Run call
     id_tok = get_id_token(settings.start_pipeline_url)
 
     resp = http_request_with_retry(
         method="POST",
         url=settings.start_pipeline_url,
         headers={"Authorization": f"Bearer {id_tok}"},
-        json_body={
-            "asset_id": asset_id,
-            "getty_metadata": metadata,
-            "download_url": url,
-        },
+        json_body=payload,
         timeout=settings.getty_timeout_seconds,
         max_retries=settings.getty_max_retries,
         backoff_seconds=settings.getty_backoff_seconds,
