@@ -1,10 +1,10 @@
 import os
+import copy
 import requests
-from fastapi import FastAPI, Request, HTTPException
 from datetime import datetime
+from fastapi import FastAPI, Request, HTTPException
 import google.auth.transport.requests
 import google.oauth2.id_token
-import copy
 
 app = FastAPI()
 
@@ -41,7 +41,7 @@ def parse_gs_url(gs_url: str) -> tuple[str, str]:
     if not gs_url.startswith("gs://"):
         raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {gs_url}")
 
-    without_scheme = gs_url[len("gs://") :]  # strip 'gs://'
+    without_scheme = gs_url[len("gs://"):]  # strip 'gs://'
     parts = without_scheme.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {gs_url}")
@@ -125,7 +125,19 @@ def build_initial_payload(data: dict) -> dict:
         bucket, object_name = parse_gs_url(media_url)
         file_name = object_name  # full path inside bucket
 
-        asset_type = media_type if media_type in ["image", "video", "audio"] else detect_asset_type_from_filename(file_name)
+        asset_type = (
+            media_type
+            if media_type in ["image", "video", "audio"]
+            else detect_asset_type_from_filename(file_name)
+        )
+
+        # Getty assets keep their folder (e.g., getty/<id>.mp4)
+        # Non‑Getty assets can still be normalised differently later if needed
+        if source == "getty":
+            raw_path = media_url
+        else:
+            # For non‑Getty media_url, keep existing behaviour: use the given path
+            raw_path = media_url
 
         payload = {
             "asset_id": asset_id,
@@ -135,7 +147,7 @@ def build_initial_payload(data: dict) -> dict:
             "bucket": bucket,
             "file_name": file_name,
             "paths": {
-                "raw": media_url
+                "raw": raw_path
             }
         }
 
