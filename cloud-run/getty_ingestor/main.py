@@ -48,20 +48,12 @@ def get_settings() -> Settings:
 
 
 # -------------------------------------------------------------------
-# Cloud Run → Cloud Run ID Token Auth
+# Cloud Run → Cloud Run ID Token Auth (correct method)
 # -------------------------------------------------------------------
 def get_id_token(audience: str) -> str:
     creds, _ = google.auth.default()
     auth_req = Request()
-
-    # Wrap existing credentials into ID-token-capable credentials
-    target_creds = id_token.IDTokenCredentials.from_credentials(
-        creds,
-        target_audience=audience,
-    )
-
-    target_creds.refresh(auth_req)
-    return target_creds.token
+    return id_token.fetch_id_token(auth_req, audience)
 
 
 # -------------------------------------------------------------------
