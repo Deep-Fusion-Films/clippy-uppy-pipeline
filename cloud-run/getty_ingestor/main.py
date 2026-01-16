@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": None,
         "env_prefix": "",
-        "case_sensitive": True,
+        "case_sensitive": False,   # ⭐ FIX: allow GETTY_API_KEY → getty_api_key
         "extra": "allow",
     }
 
@@ -292,10 +292,12 @@ def debug_env(settings: Settings = Depends(get_settings)):
         "start_pipeline_url": settings.start_pipeline_url,
     }
 
+
 @app.get("/debug/print")
 def debug_print():
     import os
     return dict(os.environ)
+
 
 @app.get("/debug/raw")
 def debug_raw():
@@ -337,3 +339,4 @@ def search_and_run(q: str, settings: Settings = Depends(get_settings)):
         download_attempt_status=download_attempt["status"],
         download_attempt_body=download_attempt["body"],
     )
+
