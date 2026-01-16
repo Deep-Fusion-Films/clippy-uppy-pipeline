@@ -201,17 +201,18 @@ def extract_preview_mp4(video: Dict[str, Any]) -> Optional[str]:
 
 
 # -------------------------------------------------------------------
-# GCS Upload Helper
+# GCS Upload Helper (streaming, OOM-safe)
 # -------------------------------------------------------------------
 def upload_to_gcs(bucket_name: str, blob_name: str, source_url: str) -> str:
-    resp = requests.get(source_url, stream=True)
-    resp.raise_for_status()
+    # Stream from Getty → GCS without loading whole file into memory
+    with requests.get(source_url, stream=True) as resp:
+        resp.raise_for_status()
 
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
 
-    blob.upload_from_string(resp.content, content_type="video/mp4")
+        blob.upload_from_file(resp.raw, content_type="video/mp4")
 
     return f"gs://{bucket_name}/{blob_name}"
 
@@ -288,7 +289,7 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------
-# Trigger Pipeline (Cloud Run Auth + GCS upload + JSON parsing fix)
+# Trigger Pipeline (Cloud Run Auth + GCS upload + JSON parsing)
 # -------------------------------------------------------------------
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings: Settings):
 
