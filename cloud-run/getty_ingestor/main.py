@@ -12,6 +12,7 @@ from google.auth.transport.requests import Request
 from google.oauth2 import id_token
 import google.auth
 from google.cloud import storage
+import random
 
 # -------------------------------------------------------------------
 # Logging
@@ -65,6 +66,36 @@ def get_id_token(audience: str) -> str:
 app = FastAPI(title="Getty Ingestor Service", version="1.0.0")
 
 _token_cache: Optional[Dict[str, Any]] = None
+
+# -------------------------------------------------------------------
+# Used IDs tracking (GCS-backed, for non-repeating assets)
+# -------------------------------------------------------------------
+USED_IDS_BUCKET = "df-films-assets-euw1"
+USED_IDS_BLOB = "getty/used_ids.json"
+
+
+def load_used_ids() -> set[str]:
+    client = storage.Client()
+    bucket = client.bucket(USED_IDS_BUCKET)
+    blob = bucket.blob(USED_IDS_BLOB)
+
+    if not blob.exists():
+        return set()
+
+    data = blob.download_as_text()
+    try:
+        return set(json.loads(data))
+    except Exception:
+        logger.warning("Failed to parse used_ids JSON, resetting.")
+        return set()
+
+
+def save_used_ids(used_ids: set[str]) -> None:
+    client = storage.Client()
+    bucket = client.bucket(USED_IDS_BUCKET)
+    blob = bucket.blob(USED_IDS_BLOB)
+
+    blob.upload_from_string(json.dumps(list(used_ids)))
 
 
 # -------------------------------------------------------------------
@@ -218,7 +249,7 @@ def upload_to_gcs(bucket_name: str, blob_name: str, source_url: str) -> str:
 
 
 # -------------------------------------------------------------------
-# Getty Search
+# Getty Search (random + non-repeating)
 # -------------------------------------------------------------------
 def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
     base_url = "https://api.gettyimages.com/v3/search/videos"
@@ -228,6 +259,8 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
         "Authorization": f"Bearer {get_getty_access_token(settings)}",
         "Accept": "application/json",
     }
+
+    used_ids = load_used_ids()
 
     for page in range(1, settings.getty_search_max_pages + 1):
         resp = http_request_with_retry(
@@ -256,14 +289,24 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
         if not videos:
             continue
 
+        # Randomise order to avoid always picking the same top result
+        random.shuffle(videos)
+
         for video in videos:
             asset_id = video.get("id")
             if not asset_id:
                 continue
 
+            # Skip previously used assets
+            if asset_id in used_ids:
+                continue
+
             download_attempt = attempt_licensed_download(asset_id, settings)
 
+            # Licensed download available
             if download_attempt["status"] == 200:
+                used_ids.add(asset_id)
+                save_used_ids(used_ids)
                 return {
                     "asset": video,
                     "asset_id": asset_id,
@@ -272,8 +315,11 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
                     "preview_url": None,
                 }
 
+            # Fallback to preview MP4
             preview_url = extract_preview_mp4(video)
             if preview_url:
+                used_ids.add(asset_id)
+                save_used_ids(used_ids)
                 return {
                     "asset": video,
                     "asset_id": asset_id,
