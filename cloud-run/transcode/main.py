@@ -11,39 +11,41 @@ app = FastAPI()
 # --------------------------------------------------------------------
 # Environment variables
 # --------------------------------------------------------------------
-# IMPORTANT:
-#   ASSETS_BUCKET      = "gs://df-films-assets-euw1"
-#   TRANSCODED_BUCKET  = "gs://df-films-assets-euw1"
-#
-# Folder prefixes (raw/, transcoded/) are handled IN CODE, not in env vars.
-# --------------------------------------------------------------------
 ASSETS_BUCKET = os.getenv("ASSETS_BUCKET")          # e.g. gs://df-films-assets-euw1
 TRANSCODED_BUCKET = os.getenv("TRANSCODED_BUCKET")  # e.g. gs://df-films-assets-euw1
 
 if not ASSETS_BUCKET or not TRANSCODED_BUCKET:
-    raise RuntimeError("ASSETS_BUCKET and TRANSCODED_BUCKET environment variables must be set.")
+    raise RuntimeError("ASSETS_BUCKET and TRANSCODED_BUCKET must be set.")
 
 storage_client = storage.Client()
 
 
+# --------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------
 def normalize_bucket(bucket_uri: str) -> str:
-    """
-    Normalize a bucket URI or name to a bare bucket name.
+    """Convert gs://bucket → bucket."""
+    return bucket_uri.replace("gs://", "")
 
-    Accepts:
-      - "gs://my-bucket"
-      - "my-bucket"
 
-    Returns:
-      - "my-bucket"
+def extract_blob_name(full_gs_url: str) -> str:
     """
-    if bucket_uri.startswith("gs://"):
-        return bucket_uri[len("gs://"):]
-    return bucket_uri
+    Convert:
+        gs://bucket/getty/123.mp4
+    →   getty/123.mp4
+    """
+    if not full_gs_url.startswith("gs://"):
+        raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {full_gs_url}")
+
+    without_scheme = full_gs_url[len("gs://"):]
+    parts = without_scheme.split("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {full_gs_url}")
+
+    return parts[1]  # object path only
 
 
 def download_from_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
-    """Download file from GCS to local /tmp for processing."""
     bucket_name = normalize_bucket(bucket_uri)
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
@@ -59,7 +61,6 @@ def download_from_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
 
 
 def upload_to_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
-    """Upload file from local /tmp back to GCS."""
     bucket_name = normalize_bucket(bucket_uri)
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
@@ -68,7 +69,6 @@ def upload_to_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
 
 
 def probe_metadata(local_path: str) -> dict:
-    """Use ffprobe to extract technical metadata."""
     probe = subprocess.run(
         [
             "ffprobe",
@@ -84,7 +84,6 @@ def probe_metadata(local_path: str) -> dict:
     )
 
     meta = json.loads(probe.stdout)
-
     if "streams" not in meta or not meta["streams"]:
         raise HTTPException(status_code=500, detail="ffprobe returned no streams.")
 
@@ -100,6 +99,9 @@ def probe_metadata(local_path: str) -> dict:
     }
 
 
+# --------------------------------------------------------------------
+# Health
+# --------------------------------------------------------------------
 @app.get("/health")
 def health():
     return {
@@ -109,60 +111,37 @@ def health():
     }
 
 
+# --------------------------------------------------------------------
+# TRANSCODE ENDPOINT
+# --------------------------------------------------------------------
 @app.post("/transcode")
 async def transcode(req: Request):
-    """
-    Normalize video and return technical metadata.
-
-    Supports two modes:
-
-    1) Getty mode:
-       {
-         "asset_id": "...",
-         "paths": {
-           "raw": "gs://df-films-assets-euw1/raw/<asset_id>.mp4"
-         }
-       }
-
-    2) Local GCS mode:
-       {
-         "file_name": "raw/CE_025_0.mp4",
-         "bucket": "df-films-assets-euw1"
-       }
-    """
     data = await req.json()
 
-    # ----------------------------------------------------------------
-    # Mode 1: Getty asset_id + paths.raw
-    # ----------------------------------------------------------------
+    # ------------------------------------------------------------
+    # MODE 1: Getty (asset_id + paths.raw)
+    # ------------------------------------------------------------
     if "asset_id" in data and "paths" in data and "raw" in data["paths"]:
         asset_id = data["asset_id"]
-        raw_path = data["paths"]["raw"]  # full gs://.../raw/<asset_id>.mp4
+        raw_path = data["paths"]["raw"]  # full gs://bucket/getty/<id>.mp4
 
-        # We assume ASSETS_BUCKET points to the same bucket as raw_path's bucket.
-        # Blob name is the object path under that bucket.
-        # e.g. raw/<asset_id>.mp4
-        blob_name = f"raw/{asset_id}.mp4"
+        # Extract blob name from full GCS URL
+        blob_name = extract_blob_name(raw_path)
 
         local_in = f"/tmp/{asset_id}.mp4"
         local_out = f"/tmp/{asset_id}_normalized.mp4"
 
-    # ----------------------------------------------------------------
-    # Mode 2: Local file_name + bucket
-    # ----------------------------------------------------------------
+    # ------------------------------------------------------------
+    # MODE 2: Local GCS (file_name + bucket)
+    # ------------------------------------------------------------
     elif "file_name" in data and "bucket" in data:
-        file_name = data["file_name"]      # e.g. "raw/CE_025_0.mp4"
-        bucket = data["bucket"]            # e.g. "df-films-assets-euw1"
+        file_name = data["file_name"]      # e.g. raw/CE_025_0.mp4
+        bucket = data["bucket"]            # e.g. df-films-assets-euw1
 
         asset_id = os.path.splitext(os.path.basename(file_name))[0]
-
-        # Construct full GCS raw path
         raw_path = f"gs://{bucket}/{file_name}"
 
-        # For download, we still use ASSETS_BUCKET as the bucket,
-        # and file_name as the blob name (e.g. "raw/CE_025_0.mp4")
         blob_name = file_name
-
         local_in = f"/tmp/{asset_id}.mp4"
         local_out = f"/tmp/{asset_id}_normalized.mp4"
 
@@ -172,16 +151,14 @@ async def transcode(req: Request):
             detail="Provide either asset_id+paths.raw (Getty) OR file_name+bucket (local)",
         )
 
-    # ----------------------------------------------------------------
-    # Download raw video from ASSETS bucket
-    # ----------------------------------------------------------------
+    # ------------------------------------------------------------
+    # Download original video
+    # ------------------------------------------------------------
     download_from_gcs(ASSETS_BUCKET, blob_name, local_in)
 
-    # ----------------------------------------------------------------
-    # CLOUD RUN SAFE FFMPEG COMMAND
-    # ----------------------------------------------------------------
-    # We avoid depending on codecs that might be missing in some builds.
-    # mpeg4 + libmp3lame are widely supported in Debian ffmpeg.
+    # ------------------------------------------------------------
+    # Transcode using ffmpeg
+    # ------------------------------------------------------------
     try:
         ffmpeg_proc = subprocess.run(
             [
@@ -200,26 +177,26 @@ async def transcode(req: Request):
         if ffmpeg_proc.returncode != 0:
             raise HTTPException(
                 status_code=500,
-                detail=f"FFmpeg failed with code {ffmpeg_proc.returncode}: {ffmpeg_proc.stderr}",
+                detail=f"FFmpeg failed: {ffmpeg_proc.stderr}",
             )
     except FileNotFoundError:
-        raise HTTPException(status_code=500, detail="ffmpeg binary not found in container.")
+        raise HTTPException(status_code=500, detail="ffmpeg binary not found.")
 
-    # ----------------------------------------------------------------
-    # Upload transcoded video to TRANSCODED bucket under transcoded/
-    # ----------------------------------------------------------------
+    # ------------------------------------------------------------
+    # Upload transcoded file
+    # ------------------------------------------------------------
     transcoded_blob_name = f"transcoded/{asset_id}_normalized.mp4"
     gcs_out = upload_to_gcs(TRANSCODED_BUCKET, transcoded_blob_name, local_out)
 
-    # ----------------------------------------------------------------
-    # Extract technical metadata from the transcoded file
-    # ----------------------------------------------------------------
+    # ------------------------------------------------------------
+    # Extract metadata
+    # ------------------------------------------------------------
     technical = probe_metadata(local_out)
 
-    # ----------------------------------------------------------------
-    # Build JSON response
-    # ----------------------------------------------------------------
-    result = {
+    # ------------------------------------------------------------
+    # Response
+    # ------------------------------------------------------------
+    return {
         "asset_id": asset_id,
         "paths": {
             "raw": raw_path,
@@ -229,5 +206,3 @@ async def transcode(req: Request):
         "status": "transcoded",
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
-
-    return result
