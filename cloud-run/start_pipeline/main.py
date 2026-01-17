@@ -114,47 +114,41 @@ def build_initial_payload(data: dict) -> dict:
     # -----------------------------------------------------
     # 1. Getty / GCS ingestion via media_url (new path)
     # -----------------------------------------------------
-    if "media_url" in data:
-        media_url = data["media_url"]
-        media_type = data.get("media_type", "unknown")
-        getty_metadata = data.get("getty_metadata", {})
-        source = data.get("source", "getty")
-        asset_id = data.get("asset_id", "getty_asset")
+   if "media_url" in data:
+    media_url = data["media_url"]
+    media_type = data.get("media_type", "unknown")
+    getty_metadata = data.get("getty_metadata", {})
+    source = data.get("source", "getty")
+    asset_id = data.get("asset_id", "getty_asset")
 
-        # Expect media_url to be gs://...
-        bucket, object_name = parse_gs_url(media_url)
-        file_name = object_name  # full path inside bucket
+    bucket, object_name = parse_gs_url(media_url)
+    file_name = object_name
 
-        asset_type = (
-            media_type
-            if media_type in ["image", "video", "audio"]
-            else detect_asset_type_from_filename(file_name)
-        )
+    asset_type = (
+        media_type
+        if media_type in ["image", "video", "audio"]
+        else detect_asset_type_from_filename(file_name)
+    )
 
-        # Getty assets keep their folder (e.g., getty/<id>.mp4)
-        # Non‑Getty assets can still be normalised differently later if needed
-        if source == "getty":
-            raw_path = media_url
-        else:
-            # For non‑Getty media_url, keep existing behaviour: use the given path
-            raw_path = media_url
+    # Getty assets keep their folder (getty/<id>.mp4)
+    raw_path = media_url
 
-        payload = {
-            "asset_id": asset_id,
-            "source": source,
-            "media_type": media_type,
-            "asset_type": asset_type,
-            "bucket": bucket,
-            "file_name": file_name,
-            "paths": {
-                "raw": raw_path
-            }
+    payload = {
+        "asset_id": asset_id,
+        "source": source,
+        "media_type": media_type,
+        "asset_type": asset_type,
+        "bucket": bucket,
+        "file_name": file_name,
+        "paths": {
+            "raw": raw_path
         }
+    }
 
-        if getty_metadata:
-            payload["getty_metadata"] = getty_metadata
+    if getty_metadata:
+        payload["getty_metadata"] = getty_metadata
 
-        return payload
+    return payload
 
     # -----------------------------------------------------
     # 2. Getty ingestion (raw bytes + metadata)
