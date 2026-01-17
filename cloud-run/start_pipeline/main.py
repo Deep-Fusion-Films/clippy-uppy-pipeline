@@ -2,6 +2,7 @@ import os
 import copy
 import requests
 from datetime import datetime
+from typing import Tuple
 from fastapi import FastAPI, Request, HTTPException
 import google.auth.transport.requests
 import google.oauth2.id_token
@@ -13,7 +14,7 @@ GETTY_URL = os.getenv("GETTY_URL")
 TRANSCODE_URL = os.getenv("TRANSCODE_URL")
 TRANSCRIBE_URL = os.getenv("TRANSCRIBE_URL")
 FRAMES_URL = os.getenv("FRAMES_URL")
-ENRICHER_URL = os.getenv("ENRICHER_URL")  # renamed from QWEN_URL
+ENRICHER_URL = os.getenv("ENRICHER_URL")
 STORE_URL = os.getenv("STORE_URL")
 
 
@@ -32,16 +33,16 @@ def detect_asset_type_from_filename(file_name: str) -> str:
 
 
 # ---------------------------------------------------------
-# GS URL PARSING
+# GS URL PARSING (Python 3.9 compatible)
 # ---------------------------------------------------------
-def parse_gs_url(gs_url: str) -> tuple[str, str]:
+def parse_gs_url(gs_url: str) -> Tuple[str, str]:
     """
     Parse gs://bucket/object into (bucket, object_name)
     """
     if not gs_url.startswith("gs://"):
         raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {gs_url}")
 
-    without_scheme = gs_url[len("gs://"):]  # strip 'gs://'
+    without_scheme = gs_url[len("gs://"):]
     parts = without_scheme.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {gs_url}")
@@ -93,26 +94,20 @@ def deep_merge(a: dict, b: dict) -> dict:
 
 
 # ---------------------------------------------------------
-# INPUT NORMALISATION (MULTI‑INPUT, OPTION C)
+# INPUT NORMALISATION
 # ---------------------------------------------------------
 def build_initial_payload(data: dict) -> dict:
     """
-    Supports (priority order):
-    1. Getty/GCS ingestion (media_url = gs://..., media_type, getty_metadata)
-    2. Getty ingestion (media_bytes + media_type + getty_metadata, source=getty)
-    3. Direct upload (media_bytes + media_type)
+    Supports:
+    1. Getty/GCS ingestion (media_url = gs://...)
+    2. Getty ingestion (media_bytes + metadata)
+    3. Direct upload (media_bytes)
     4. GCS ingestion (file_name + bucket)
-    5. URL ingestion (url)
-
-    Normalizes into a common internal structure with:
-    - asset_id
-    - source
-    - asset_type
-    - bucket / file_name / paths.raw (where possible)
+    5. URL ingestion
     """
 
     # -----------------------------------------------------
-    # 1. Getty / GCS ingestion via media_url (new path)
+    # 1. Getty / GCS ingestion via media_url
     # -----------------------------------------------------
     if "media_url" in data:
         media_url = data["media_url"]
@@ -121,9 +116,8 @@ def build_initial_payload(data: dict) -> dict:
         source = data.get("source", "getty")
         asset_id = data.get("asset_id", "getty_asset")
 
-        # Expect media_url to be gs://...
         bucket, object_name = parse_gs_url(media_url)
-        file_name = object_name  # full path inside bucket
+        file_name = object_name
 
         asset_type = (
             media_type
@@ -131,13 +125,8 @@ def build_initial_payload(data: dict) -> dict:
             else detect_asset_type_from_filename(file_name)
         )
 
-        # Getty assets keep their folder (e.g., getty/<id>.mp4)
-        # Non‑Getty assets can still be normalised differently later if needed
-        if source == "getty":
-            raw_path = media_url
-        else:
-            # For non‑Getty media_url, keep existing behaviour: use the given path
-            raw_path = media_url
+        # Always trust media_url as the raw path
+        raw_path = media_url
 
         payload = {
             "asset_id": asset_id,
@@ -166,7 +155,7 @@ def build_initial_payload(data: dict) -> dict:
             "media_type": data["media_type"],
             "media_bytes": data["media_bytes"],
             "getty_metadata": data.get("getty_metadata", {}),
-            "asset_type": data["media_type"],  # image or video
+            "asset_type": data["media_type"],
         }
 
     # -----------------------------------------------------
@@ -182,7 +171,7 @@ def build_initial_payload(data: dict) -> dict:
         }
 
     # -----------------------------------------------------
-    # 4. GCS-based ingestion (existing behavior)
+    # 4. GCS ingestion
     # -----------------------------------------------------
     if "file_name" in data and "bucket" in data:
         file_name = data["file_name"]
@@ -204,7 +193,7 @@ def build_initial_payload(data: dict) -> dict:
         }
 
     # -----------------------------------------------------
-    # 5. URL ingestion (optional)
+    # 5. URL ingestion
     # -----------------------------------------------------
     if "url" in data:
         return {
@@ -245,32 +234,31 @@ def health():
 async def run_all(req: Request):
     data = await req.json()
 
-    # Step 0: Normalize input
     payload = build_initial_payload(data)
     asset_type = payload.get("asset_type")
 
     merged = payload
 
-    # Step 1: Transcode (video only, and only if not using inline media_bytes)
+    # Step 1: Transcode
     if asset_type == "video" and "media_bytes" not in payload:
         transcode_json = call_service(TRANSCODE_URL, "transcode", merged)
         merged = deep_merge(merged, transcode_json)
 
-    # Step 2: Transcribe (video or audio)
+    # Step 2: Transcribe
     if asset_type in ["video", "audio"]:
         transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", merged)
         merged = deep_merge(merged, transcribe_json)
 
-    # Step 3: Sample frames (video only, and only if not using inline media_bytes)
+    # Step 3: Sample frames
     if asset_type == "video" and "media_bytes" not in payload:
         frames_json = call_service(FRAMES_URL, "sample", merged)
         merged = deep_merge(merged, frames_json)
 
-    # Step 4: Enrichment (always runs)
+    # Step 4: Enrich
     enrich_json = call_service(ENRICHER_URL, "enrich", merged)
     merged["analysis"] = enrich_json
 
-    # Step 5: Store metadata (always runs)
+    # Step 5: Store
     stored_json = call_service(STORE_URL, "store", merged)
 
     return {
