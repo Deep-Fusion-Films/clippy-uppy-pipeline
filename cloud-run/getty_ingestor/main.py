@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     getty_max_retries: int = 3
     getty_backoff_seconds: float = 0.5
 
+    # NEW: pipeline timeout (default 5 minutes)
+    pipeline_timeout_seconds: int = 300
+
     model_config = {
         "env_file": None,
         "env_prefix": "",
@@ -47,7 +50,6 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
-    # IMPORTANT: this must be reloaded on every request
     return Settings()
 
 
@@ -66,6 +68,7 @@ def get_id_token(audience: str) -> str:
 app = FastAPI(title="Getty Ingestor Service", version="1.0.0")
 
 _token_cache: Optional[Dict[str, Any]] = None
+
 
 # -------------------------------------------------------------------
 # Used IDs tracking (GCS-backed, for non-repeating assets)
@@ -94,7 +97,6 @@ def save_used_ids(used_ids: set[str]) -> None:
     client = storage.Client()
     bucket = client.bucket(USED_IDS_BUCKET)
     blob = bucket.blob(USED_IDS_BLOB)
-
     blob.upload_from_string(json.dumps(list(used_ids)))
 
 
@@ -289,7 +291,6 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
         if not videos:
             continue
 
-        # Randomise order to avoid always picking the same top result
         random.shuffle(videos)
 
         for video in videos:
@@ -297,13 +298,11 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
             if not asset_id:
                 continue
 
-            # Skip previously used assets
             if asset_id in used_ids:
                 continue
 
             download_attempt = attempt_licensed_download(asset_id, settings)
 
-            # Licensed download available
             if download_attempt["status"] == 200:
                 used_ids.add(asset_id)
                 save_used_ids(used_ids)
@@ -315,7 +314,6 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
                     "preview_url": None,
                 }
 
-            # Fallback to preview MP4
             preview_url = extract_preview_mp4(video)
             if preview_url:
                 used_ids.add(asset_id)
@@ -335,22 +333,19 @@ def find_first_usable_asset(query: str, settings: Settings) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------
-# Trigger Pipeline
+# Trigger Pipeline (with extended timeout)
 # -------------------------------------------------------------------
 def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings: Settings):
 
-    # Parse Getty JSON if needed
     if url.strip().startswith("{"):
         try:
             url = json.loads(url)["uri"]
         except Exception:
             raise HTTPException(status_code=500, detail="Failed to parse Getty download URL")
 
-    # Upload preview MP4 to GCS
     gcs_blob = f"getty/{asset_id}.mp4"
     gcs_url = upload_to_gcs("df-films-assets-euw1", gcs_blob, url)
 
-    # Build correct payload for pipeline
     payload = {
         "media_url": gcs_url,
         "media_type": "video",
@@ -359,7 +354,6 @@ def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings
         "asset_id": asset_id,
     }
 
-    # Authenticated Cloud Run → Cloud Run call
     id_tok = get_id_token(settings.start_pipeline_url)
 
     logger.info(f"Calling pipeline URL: {settings.start_pipeline_url}")
@@ -369,7 +363,10 @@ def trigger_pipeline(asset_id: str, metadata: Dict[str, Any], url: str, settings
         url=settings.start_pipeline_url,
         headers={"Authorization": f"Bearer {id_tok}"},
         json_body=payload,
-        timeout=settings.getty_timeout_seconds,
+
+        # NEW: use extended timeout
+        timeout=settings.pipeline_timeout_seconds,
+
         max_retries=settings.getty_max_retries,
         backoff_seconds=settings.getty_backoff_seconds,
     )
@@ -390,6 +387,7 @@ def debug_env(settings: Settings = Depends(get_settings, use_cache=False)):
         "getty_api_key": settings.getty_api_key,
         "getty_api_secret": settings.getty_api_secret,
         "start_pipeline_url": settings.start_pipeline_url,
+        "pipeline_timeout_seconds": settings.pipeline_timeout_seconds,
     }
 
 
