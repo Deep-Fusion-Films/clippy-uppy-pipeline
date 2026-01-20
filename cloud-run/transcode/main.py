@@ -35,7 +35,7 @@ def extract_blob_name(full_gs_url: str) -> str:
     →   getty/123.mp4
     """
     if not full_gs_url.startswith("gs://"):
-        raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {full_gCS_url}")
+        raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {full_gs_url}")
 
     without_scheme = full_gs_url[len("gs://"):]
     parts = without_scheme.split("/", 1)
@@ -68,9 +68,9 @@ def upload_to_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
     return f"gs://{bucket_name}/{blob_name}"
 
 
-def probe_metadata(local_path: str) -> dict:
+def probe_video_metadata(local_path: str) -> dict:
     """
-    Extract technical metadata from a (presumably valid) media file.
+    Extract technical metadata for video from a (presumably valid) media file.
     Raises HTTPException only if ffprobe itself is missing or misbehaves.
     """
     try:
@@ -78,8 +78,10 @@ def probe_metadata(local_path: str) -> dict:
             [
                 "ffprobe",
                 "-v", "error",
+                "-select_streams", "v:0",
                 "-show_entries",
-                "format=duration,size:stream=codec_name,bit_rate,width,height,r_frame_rate",
+                "stream=codec_name,bit_rate,width,height,r_frame_rate,"
+                "format=duration,size",
                 "-of", "json",
                 local_path,
             ],
@@ -90,25 +92,76 @@ def probe_metadata(local_path: str) -> dict:
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="ffprobe binary not found.")
     except subprocess.CalledProcessError as e:
-        # ffprobe couldn't parse the file – treat as invalid media
         raise HTTPException(
             status_code=500,
-            detail=f"ffprobe failed on transcoded output: {e.stderr}"
+            detail=f"ffprobe failed on transcoded video: {e.stderr}"
         )
 
-    meta = json.loads(probe.stdout)
-    if "streams" not in meta or not meta["streams"]:
-        raise HTTPException(status_code=500, detail="ffprobe returned no streams.")
+    meta = json.loads(probe.stdout or "{}")
+    streams = meta.get("streams", [])
+    if not streams:
+        raise HTTPException(status_code=500, detail="ffprobe returned no video streams.")
 
-    stream = next((st for st in meta["streams"] if st.get("codec_name")), meta["streams"][0])
+    stream = streams[0]
+    fmt = meta.get("format", {})
 
     return {
         "codec": stream.get("codec_name"),
         "bitrate": stream.get("bit_rate"),
         "frame_rate": stream.get("r_frame_rate"),
         "resolution": f"{stream.get('width')}x{stream.get('height')}",
-        "duration": meta.get("format", {}).get("duration"),
-        "file_size": meta.get("format", {}).get("size"),
+        "duration": fmt.get("duration"),
+        "file_size": fmt.get("size"),
+    }
+
+
+def probe_audio_metadata(local_path: str) -> dict | None:
+    """
+    Extract technical metadata for audio, if present.
+    Returns dict if audio stream exists and is readable, otherwise None.
+    Never raises for asset-level issues; only for ffprobe missing.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries",
+                "stream=codec_name,bit_rate,channels,sample_rate,"
+                "format=duration,size",
+                "-of", "json",
+                local_path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="ffprobe binary not found.")
+
+    if proc.returncode != 0:
+        # Treat as "no usable audio metadata"
+        return None
+
+    try:
+        meta = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+
+    streams = meta.get("streams", [])
+    if not streams:
+        return None
+
+    stream = streams[0]
+    fmt = meta.get("format", {})
+
+    return {
+        "codec": stream.get("codec_name"),
+        "bitrate": stream.get("bit_rate"),
+        "channels": stream.get("channels"),
+        "sample_rate": stream.get("sample_rate"),
+        "duration": fmt.get("duration"),
+        "file_size": fmt.get("size"),
     }
 
 
@@ -131,7 +184,6 @@ def safe_probe_input(local_path: str) -> tuple[bool, str | None]:
         )
         if proc.returncode != 0:
             return False, proc.stderr.strip() or "ffprobe returned non-zero exit code"
-        # If ffprobe produced no JSON or empty format, treat as invalid
         try:
             meta = json.loads(proc.stdout or "{}")
         except json.JSONDecodeError:
@@ -140,8 +192,34 @@ def safe_probe_input(local_path: str) -> tuple[bool, str | None]:
             return False, "ffprobe found no format information"
         return True, None
     except FileNotFoundError:
-        # If ffprobe is missing, that's a service misconfig, not an asset issue
         raise HTTPException(status_code=500, detail="ffprobe binary not found.")
+
+
+def has_audio_stream(local_path: str) -> bool:
+    """
+    Check if the input file has at least one audio stream.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=index",
+                "-of", "csv=p=0",
+                local_path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="ffprobe binary not found.")
+
+    if proc.returncode != 0:
+        return False
+
+    # If ffprobe prints at least one line, there is an audio stream
+    return bool(proc.stdout.strip())
 
 
 # --------------------------------------------------------------------
@@ -170,11 +248,10 @@ async def transcode(req: Request):
         asset_id = data["asset_id"]
         raw_path = data["paths"]["raw"]  # full gs://bucket/getty/<id>.mp4
 
-        # Extract blob name from full GCS URL
         blob_name = extract_blob_name(raw_path)
-
         local_in = f"/tmp/{asset_id}.mp4"
-        local_out = f"/tmp/{asset_id}_normalized.mp4"
+        local_video_out = f"/tmp/{asset_id}_normalized.mp4"
+        local_audio_out = f"/tmp/{asset_id}_audio.mp3"
 
     # ------------------------------------------------------------
     # MODE 2: Local GCS (file_name + bucket)
@@ -188,7 +265,8 @@ async def transcode(req: Request):
 
         blob_name = file_name
         local_in = f"/tmp/{asset_id}.mp4"
-        local_out = f"/tmp/{asset_id}_normalized.mp4"
+        local_video_out = f"/tmp/{asset_id}_normalized.mp4"
+        local_audio_out = f"/tmp/{asset_id}_audio.mp3"
 
     else:
         raise HTTPException(
@@ -206,33 +284,40 @@ async def transcode(req: Request):
     # ------------------------------------------------------------
     is_valid, probe_error = safe_probe_input(local_in)
     if not is_valid:
-        # Do NOT blow up the pipeline – return a graceful "skipped" result
         return {
             "asset_id": asset_id,
             "paths": {
                 "raw": raw_path,
-                "transcoded": None,
+                "transcoded": {
+                    "video": None,
+                    "audio": None,
+                },
             },
-            "technical": None,
-            "status": "skipped_invalid_input",
+            "technical": {
+                "video": None,
+                "audio": None,
+            },
+            "status": {
+                "video": "skipped_invalid_input",
+                "audio": "skipped_invalid_input",
+            },
             "reason": f"ffprobe could not read input: {probe_error}",
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
 
     # ------------------------------------------------------------
-    # Transcode using ffmpeg
+    # Transcode video using ffmpeg
     # ------------------------------------------------------------
     try:
-        ffmpeg_proc = subprocess.run(
+        ffmpeg_video = subprocess.run(
             [
                 "ffmpeg",
                 "-y",
                 "-i", local_in,
                 "-c:v", "mpeg4",
                 "-qscale:v", "2",
-                "-c:a", "libmp3lame",
-                "-qscale:a", "2",
-                local_out,
+                "-an",  # drop audio in this pass
+                local_video_out,
             ],
             capture_output=True,
             text=True,
@@ -240,41 +325,93 @@ async def transcode(req: Request):
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="ffmpeg binary not found.")
 
-    if ffmpeg_proc.returncode != 0:
-        # Again: do NOT kill the pipeline – report a soft failure
-        return {
-            "asset_id": asset_id,
-            "paths": {
-                "raw": raw_path,
-                "transcoded": None,
-            },
-            "technical": None,
-            "status": "transcode_failed",
-            "reason": f"FFmpeg failed: {ffmpeg_proc.stderr[:2000]}",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        }
+    video_status = "transcoded"
+    video_reason = None
+
+    if ffmpeg_video.returncode != 0:
+        video_status = "transcode_failed"
+        video_reason = ffmpeg_video.stderr[:2000]
+        local_video_out = None
 
     # ------------------------------------------------------------
-    # Upload transcoded file
+    # Audio extraction (optional, non-blocking)
     # ------------------------------------------------------------
-    transcoded_blob_name = f"transcoded/{asset_id}_normalized.mp4"
-    gcs_out = upload_to_gcs(TRANSCODED_BUCKET, transcoded_blob_name, local_out)
+    audio_status = "not_attempted"
+    audio_reason = None
+    audio_gcs_path = None
+    audio_technical = None
+
+    if has_audio_stream(local_in):
+        try:
+            ffmpeg_audio = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i", local_in,
+                    "-vn",
+                    "-acodec", "libmp3lame",
+                    "-qscale:a", "2",
+                    local_audio_out,
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            raise HTTPException(status_code=500, detail="ffmpeg binary not found.")
+
+        if ffmpeg_audio.returncode == 0:
+            # Upload audio
+            audio_blob_name = f"transcoded/{asset_id}_audio.mp3"
+            audio_gcs_path = upload_to_gcs(TRANSCODED_BUCKET, audio_blob_name, local_audio_out)
+            audio_status = "extracted"
+            audio_technical = probe_audio_metadata(local_audio_out)
+        else:
+            audio_status = "audio_extraction_failed"
+            audio_reason = ffmpeg_audio.stderr[:2000]
+    else:
+        audio_status = "no_audio_present"
 
     # ------------------------------------------------------------
-    # Extract metadata from transcoded output
+    # Upload transcoded video (if successful)
     # ------------------------------------------------------------
-    technical = probe_metadata(local_out)
+    video_gcs_path = None
+    video_technical = None
+
+    if local_video_out is not None and video_status == "transcoded":
+        transcoded_blob_name = f"transcoded/{asset_id}_normalized.mp4"
+        video_gcs_path = upload_to_gcs(TRANSCODED_BUCKET, transcoded_blob_name, local_video_out)
+        video_technical = probe_video_metadata(local_video_out)
 
     # ------------------------------------------------------------
-    # Response
+    # Response (organised / nested)
     # ------------------------------------------------------------
-    return {
+    response = {
         "asset_id": asset_id,
         "paths": {
             "raw": raw_path,
-            "transcoded": gcs_out,
+            "transcoded": {
+                "video": video_gcs_path,
+                "audio": audio_gcs_path,
+            },
         },
-        "technical": technical,
-        "status": "transcoded",
+        "technical": {
+            "video": video_technical,
+            "audio": audio_technical,
+        },
+        "status": {
+            "video": video_status,
+            "audio": audio_status,
+        },
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
+
+    # Attach reasons only when they exist
+    reasons = {}
+    if video_reason:
+        reasons["video_reason"] = video_reason
+    if audio_reason:
+        reasons["audio_reason"] = audio_reason
+    if reasons:
+        response["reason"] = reasons
+
+    return response
