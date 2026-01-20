@@ -238,18 +238,36 @@ async def run_all(req: Request):
     asset_type = payload.get("asset_type")
 
     merged = payload
+    audio_status = None  # track audio status from transcoder for video assets
 
-    # Step 1: Transcode
+    # Step 1: Transcode (video only, non-byte Getty/GCS/local)
     if asset_type == "video" and "media_bytes" not in payload:
         transcode_json = call_service(TRANSCODE_URL, "transcode", merged)
         merged = deep_merge(merged, transcode_json)
 
+        # Try to read audio status from transcoder response
+        audio_status = (
+            merged.get("status", {})
+            .get("audio")
+        )
+
     # Step 2: Transcribe
-    if asset_type in ["video", "audio"]:
+    # - For pure audio assets: always attempt transcription
+    # - For video assets: only if audio was actually extracted
+    should_transcribe = False
+
+    if asset_type == "audio":
+        should_transcribe = True
+    elif asset_type == "video":
+        # Only transcribe if transcoder reported usable audio
+        if audio_status == "extracted":
+            should_transcribe = True
+
+    if should_transcribe:
         transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", merged)
         merged = deep_merge(merged, transcribe_json)
 
-    # Step 3: Sample frames
+    # Step 3: Sample frames (video only, non-byte Getty/GCS/local)
     if asset_type == "video" and "media_bytes" not in payload:
         frames_json = call_service(FRAMES_URL, "sample", merged)
         merged = deep_merge(merged, frames_json)
