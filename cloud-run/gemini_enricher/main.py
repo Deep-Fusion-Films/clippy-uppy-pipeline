@@ -180,7 +180,7 @@ STRICT RULES:
 - Output MUST be valid JSON following the schema exactly.
 - No markdown, no commentary, no extra keys.
 
-Your goal is to produce the most detailed, accurate, non‑fictional, non‑redundant analysis possible based solely on what the media shows.
+Your goal is to produce the most detailed, accurate, non‑fictional, non‑redundant analysis possible based solely on what the media shows. List any recognisable people or landmarks, species, object, sub species. Be very specific and be descriptive about everything thats seen. Fully in depth observation 
 
 Schema:
 {{schema}}
