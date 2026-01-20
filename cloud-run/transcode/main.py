@@ -35,7 +35,7 @@ def extract_blob_name(full_gs_url: str) -> str:
     →   getty/123.mp4
     """
     if not full_gs_url.startswith("gs://"):
-        raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {full_gs_url}")
+        raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {full_gCS_url}")
 
     without_scheme = full_gs_url[len("gs://"):]
     parts = without_scheme.split("/", 1)
@@ -69,19 +69,32 @@ def upload_to_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
 
 
 def probe_metadata(local_path: str) -> dict:
-    probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries",
-            "format=duration,size:stream=codec_name,bit_rate,width,height,r_frame_rate",
-            "-of", "json",
-            local_path,
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    """
+    Extract technical metadata from a (presumably valid) media file.
+    Raises HTTPException only if ffprobe itself is missing or misbehaves.
+    """
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries",
+                "format=duration,size:stream=codec_name,bit_rate,width,height,r_frame_rate",
+                "-of", "json",
+                local_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="ffprobe binary not found.")
+    except subprocess.CalledProcessError as e:
+        # ffprobe couldn't parse the file – treat as invalid media
+        raise HTTPException(
+            status_code=500,
+            detail=f"ffprobe failed on transcoded output: {e.stderr}"
+        )
 
     meta = json.loads(probe.stdout)
     if "streams" not in meta or not meta["streams"]:
@@ -97,6 +110,38 @@ def probe_metadata(local_path: str) -> dict:
         "duration": meta.get("format", {}).get("duration"),
         "file_size": meta.get("format", {}).get("size"),
     }
+
+
+def safe_probe_input(local_path: str) -> tuple[bool, str | None]:
+    """
+    Lightweight pre-flight check: is this a valid media file ffprobe can read?
+    Returns (is_valid, error_message_if_any).
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                local_path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return False, proc.stderr.strip() or "ffprobe returned non-zero exit code"
+        # If ffprobe produced no JSON or empty format, treat as invalid
+        try:
+            meta = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            return False, "ffprobe produced invalid JSON"
+        if "format" not in meta:
+            return False, "ffprobe found no format information"
+        return True, None
+    except FileNotFoundError:
+        # If ffprobe is missing, that's a service misconfig, not an asset issue
+        raise HTTPException(status_code=500, detail="ffprobe binary not found.")
 
 
 # --------------------------------------------------------------------
@@ -157,6 +202,24 @@ async def transcode(req: Request):
     download_from_gcs(ASSETS_BUCKET, blob_name, local_in)
 
     # ------------------------------------------------------------
+    # Pre-flight: validate input with ffprobe
+    # ------------------------------------------------------------
+    is_valid, probe_error = safe_probe_input(local_in)
+    if not is_valid:
+        # Do NOT blow up the pipeline – return a graceful "skipped" result
+        return {
+            "asset_id": asset_id,
+            "paths": {
+                "raw": raw_path,
+                "transcoded": None,
+            },
+            "technical": None,
+            "status": "skipped_invalid_input",
+            "reason": f"ffprobe could not read input: {probe_error}",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+
+    # ------------------------------------------------------------
     # Transcode using ffmpeg
     # ------------------------------------------------------------
     try:
@@ -174,13 +237,22 @@ async def transcode(req: Request):
             capture_output=True,
             text=True,
         )
-        if ffmpeg_proc.returncode != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"FFmpeg failed: {ffmpeg_proc.stderr}",
-            )
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="ffmpeg binary not found.")
+
+    if ffmpeg_proc.returncode != 0:
+        # Again: do NOT kill the pipeline – report a soft failure
+        return {
+            "asset_id": asset_id,
+            "paths": {
+                "raw": raw_path,
+                "transcoded": None,
+            },
+            "technical": None,
+            "status": "transcode_failed",
+            "reason": f"FFmpeg failed: {ffmpeg_proc.stderr[:2000]}",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
 
     # ------------------------------------------------------------
     # Upload transcoded file
@@ -189,7 +261,7 @@ async def transcode(req: Request):
     gcs_out = upload_to_gcs(TRANSCODED_BUCKET, transcoded_blob_name, local_out)
 
     # ------------------------------------------------------------
-    # Extract metadata
+    # Extract metadata from transcoded output
     # ------------------------------------------------------------
     technical = probe_metadata(local_out)
 
