@@ -1,11 +1,11 @@
 import os
 import json
+from datetime import datetime
 from typing import Optional
 
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from datetime import datetime
 
 import google.auth.transport.requests
 import google.oauth2.id_token
@@ -15,28 +15,31 @@ app = FastAPI()
 # -------------------------------------------------------------------
 # Environment
 # -------------------------------------------------------------------
-# Getty helper service that can search + download (your existing service or proxy)
-GETTY_HELPER_URL = os.getenv("GETTY_HELPER_URL")  # e.g. https://getty-helper-service-...run.app
-# Start-pipeline service
-PIPELINE_URL = os.getenv("PIPELINE_URL")          # e.g. https://start-pipeline-...run.app/run_all
+# Existing envs you already use in this project
+GETTY_URL = os.getenv("GETTY_URL")        # e.g. https://getty-helper-service-...run.app
+PIPELINE_URL = os.getenv("PIPELINE_URL")  # e.g. https://start-pipeline-service-...run.app
 
-if not GETTY_HELPER_URL or not PIPELINE_URL:
-    raise RuntimeError("GETTY_HELPER_URL and PIPELINE_URL must be set.")
+# NOTE: we no longer raise at import time if these are missing.
+# /health will expose them so you can see misconfig without killing the container.
 
 
 # -------------------------------------------------------------------
-# Authenticated Cloud Run call
+# Authenticated Cloud Run call (for pipeline)
 # -------------------------------------------------------------------
-def call_cloud_run(url: str, json_payload: dict) -> requests.Response:
+def call_cloud_run(url: str, endpoint: str, json_payload: dict) -> requests.Response:
     """
     Call a Cloud Run service with an identity token.
     Returns the raw Response so caller can inspect status/text/json.
     """
+    if not url:
+        raise HTTPException(status_code=500, detail=f"Missing base URL for {endpoint}")
+
+    full_url = f"{url.rstrip('/')}/{endpoint.lstrip('/')}"
     auth_req = google.auth.transport.requests.Request()
     token = google.oauth2.id_token.fetch_id_token(auth_req, url)
 
     resp = requests.post(
-        url,
+        full_url,
         json=json_payload,
         headers={"Authorization": f"Bearer {token}"},
         timeout=300,
@@ -45,14 +48,17 @@ def call_cloud_run(url: str, json_payload: dict) -> requests.Response:
 
 
 # -------------------------------------------------------------------
-# Getty helper calls
+# Getty helper calls (using your existing GETTY_URL)
 # -------------------------------------------------------------------
 def getty_search(query: str) -> dict:
     """
-    Call your Getty helper to search for assets.
-    Expected to return JSON with at least one asset and an asset_id.
+    Call your existing Getty helper/search endpoint.
+    Expected to return JSON with a list of assets.
     """
-    url = f"{GETTY_HELPER_URL}/search"
+    if not GETTY_URL:
+        raise HTTPException(status_code=500, detail="GETTY_URL is not configured")
+
+    url = f"{GETTY_URL.rstrip('/')}/search"
     resp = requests.get(url, params={"q": query}, timeout=60)
 
     if resp.status_code != 200:
@@ -61,30 +67,25 @@ def getty_search(query: str) -> dict:
             detail=f"Getty search failed: {resp.text[:1000]}",
         )
 
-    data = resp.json()
-    return data
+    return resp.json()
 
 
 def getty_download(asset_id: str) -> tuple[int, Optional[str]]:
     """
-    Call your Getty helper to download a specific asset.
+    Call your existing Getty download helper.
     Expected to:
       - fetch from Getty delivery URL
       - store into GCS
-      - return something like { "media_url": "gs://bucket/getty/<id>.mp4" }
-    We also surface the raw download attempt status/body for debugging.
+      - return JSON like { "media_url": "gs://bucket/getty/<id>.mp4" }
+    We also surface the raw status/body for debugging.
     """
-    url = f"{GETTY_HELPER_URL}/download"
+    if not GETTY_URL:
+        return 500, "GETTY_URL is not configured"
+
+    url = f"{GETTY_URL.rstrip('/')}/download"
     resp = requests.post(url, json={"asset_id": asset_id}, timeout=300)
 
-    status = resp.status_code
-    body = resp.text
-
-    if status != 200:
-        # We still return status/body so the ingestor response can show it
-        return status, body
-
-    return status, body
+    return resp.status_code, resp.text
 
 
 # -------------------------------------------------------------------
@@ -95,7 +96,7 @@ def health():
     return {
         "status": "ok",
         "services": {
-            "getty_helper": GETTY_HELPER_URL,
+            "getty": GETTY_URL,
             "pipeline": PIPELINE_URL,
         },
         "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -113,6 +114,9 @@ def search_and_run(q: str):
     3. Ask Getty helper to download it (into GCS).
     4. Trigger the start-pipeline /run_all endpoint with media_url + asset_id.
     5. Return a compact summary including pipeline status + preview.
+
+    Audio is treated as fully optional and is handled inside the pipeline;
+    this service does NOT special-case audio at all.
     """
 
     # ---------------------------------------------------------------
@@ -135,7 +139,7 @@ def search_and_run(q: str):
             },
         )
 
-    # You can adapt this to your actual search response shape
+    # Adapt to your actual search response shape
     assets = search_json.get("assets") or search_json.get("results") or []
     if not assets:
         return {
@@ -157,7 +161,6 @@ def search_and_run(q: str):
     # ---------------------------------------------------------------
     download_status, download_body = getty_download(asset_id)
 
-    # We surface these regardless of success/failure
     download_attempt_status = download_status
     download_attempt_body = download_body
 
@@ -204,19 +207,41 @@ def search_and_run(q: str):
     # ---------------------------------------------------------------
     # 3. Trigger pipeline (run_all)
     # ---------------------------------------------------------------
+    if not PIPELINE_URL:
+        return {
+            "stage": "pipeline_misconfigured",
+            "query": q,
+            "asset_id": asset_id,
+            "pipeline_status": None,
+            "pipeline_preview": None,
+            "error": "PIPELINE_URL is not configured.",
+            "download_attempt_status": download_attempt_status,
+            "download_attempt_body": download_attempt_body,
+        }
+
     pipeline_payload = {
         "media_url": media_url,
         "asset_id": asset_id,
         "source": "getty",
-        "media_type": "video",  # Getty clips here are video; adjust if needed
+        "media_type": "video",  # adjust if you later support images/audio here
     }
 
-    pipeline_resp = call_cloud_run(PIPELINE_URL, pipeline_payload)
+    try:
+        pipeline_resp = call_cloud_run(PIPELINE_URL, "run_all", pipeline_payload)
+    except HTTPException as e:
+        return {
+            "stage": "pipeline_error",
+            "query": q,
+            "asset_id": asset_id,
+            "pipeline_status": e.status_code,
+            "pipeline_preview": str(e.detail)[:2000],
+            "error": "Pipeline call failed.",
+            "download_attempt_status": download_attempt_status,
+            "download_attempt_body": download_attempt_body,
+        }
+
     pipeline_status = pipeline_resp.status_code
 
-    # We do NOT special-case audio at all here.
-    # Audio is fully optional and handled inside the pipeline/transcoder.
-    # We just surface whatever the pipeline returns.
     try:
         pipeline_json = pipeline_resp.json()
         pipeline_preview = json.dumps(pipeline_json)[:2000]
@@ -224,11 +249,13 @@ def search_and_run(q: str):
         pipeline_preview = pipeline_resp.text[:2000]
 
     error = None
+    stage = "complete"
     if pipeline_status != 200:
         error = "Pipeline returned non-200 status."
+        stage = "pipeline_error"
 
     return {
-        "stage": "complete" if pipeline_status == 200 else "pipeline_error",
+        "stage": stage,
         "query": q,
         "asset_id": asset_id,
         "pipeline_status": pipeline_status,
