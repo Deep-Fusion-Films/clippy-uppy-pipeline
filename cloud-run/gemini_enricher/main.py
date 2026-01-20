@@ -156,30 +156,36 @@ SCHEMA_BLOCK = """
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict, media_type: str) -> str:
     media_line = (
-        "You are given a REAL video." if media_type == "video"
+        "You are given a REAL video."
+        if media_type == "video"
         else "You are given a REAL image."
     )
 
     template = f"""
-You are an analyst for a factual documentary.
+You are a forensic visual analyst.
 
 {media_line}
-Metadata may be incomplete or wrong.
+Your task is to extract ONLY information that is directly visible in the media.
+Metadata may be incomplete, noisy, or partially incorrect. Treat it as optional context, not fact.
 
-Your job:
-- Describe ONLY what is visible in the media.
-- Use metadata only as weak hints.
-- Never invent details not clearly visible.
+STRICT RULES:
+- Describe ONLY what is visually present.
+- Do NOT invent or assume anything that cannot be clearly confirmed.
+- Do NOT use metadata to add details that are not visible.
+- Do NOT repeat the same information across multiple fields.
+- Be specific, concrete, and observational.
+- If something is unclear or partially visible, state the uncertainty.
+- If a field has no visible evidence, return null or an empty list.
+- Avoid generic statements; focus on precise, observable attributes.
+- Output MUST be valid JSON following the schema exactly.
+- No markdown, no commentary, no extra keys.
 
-Output STRICT JSON only.
-No markdown fences.
-No 'json' prefix.
-No extra keys.
+Your goal is to produce the most detailed, accurate, non‑fictional, non‑redundant analysis possible based solely on what the media shows.
 
 Schema:
 {{schema}}
 
-Metadata:
+Metadata (weak hints only):
 {{metadata}}
 """
 
@@ -187,6 +193,7 @@ Metadata:
         schema=SCHEMA_BLOCK,
         metadata=json.dumps(asset_json, indent=2),
     ).strip()
+
 
 
 # -------------------------------------------------------------------
