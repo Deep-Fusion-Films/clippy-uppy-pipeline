@@ -15,24 +15,15 @@ app = FastAPI()
 # -------------------------------------------------------------------
 # Environment
 # -------------------------------------------------------------------
-# Existing envs you already use in this project
-GETTY_URL = os.getenv("GETTY_URL")        # e.g. https://getty-helper-service-...run.app
-PIPELINE_URL = os.getenv("PIPELINE_URL")  # e.g. https://start-pipeline-service-...run.app
-
-# NOTE: we no longer raise at import time if these are missing.
-# /health will expose them so you can see misconfig without killing the container.
+PIPELINE_URL = os.getenv("PIPELINE_URL")  # only required env var
 
 
 # -------------------------------------------------------------------
-# Authenticated Cloud Run call (for pipeline)
+# Authenticated Cloud Run call
 # -------------------------------------------------------------------
 def call_cloud_run(url: str, endpoint: str, json_payload: dict) -> requests.Response:
-    """
-    Call a Cloud Run service with an identity token.
-    Returns the raw Response so caller can inspect status/text/json.
-    """
     if not url:
-        raise HTTPException(status_code=500, detail=f"Missing base URL for {endpoint}")
+        raise HTTPException(status_code=500, detail="PIPELINE_URL is not configured")
 
     full_url = f"{url.rstrip('/')}/{endpoint.lstrip('/')}"
     auth_req = google.auth.transport.requests.Request()
@@ -48,43 +39,43 @@ def call_cloud_run(url: str, endpoint: str, json_payload: dict) -> requests.Resp
 
 
 # -------------------------------------------------------------------
-# Getty helper calls (using your existing GETTY_URL)
+# Getty search (direct API call)
 # -------------------------------------------------------------------
 def getty_search(query: str) -> dict:
     """
-    Call your existing Getty helper/search endpoint.
-    Expected to return JSON with a list of assets.
+    Calls Getty Images API directly.
+    Replace YOUR_API_KEY with your actual key.
     """
-    if not GETTY_URL:
-        raise HTTPException(status_code=500, detail="GETTY_URL is not configured")
+    api_key = os.getenv("GETTY_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "GETTY_API_KEY is not configured")
 
-    url = f"{GETTY_URL.rstrip('/')}/search"
-    resp = requests.get(url, params={"q": query}, timeout=60)
+    url = "https://api.gettyimages.com/v3/search/videos"
+    headers = {"Api-Key": api_key}
+
+    resp = requests.get(url, params={"phrase": query}, headers=headers, timeout=60)
 
     if resp.status_code != 200:
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=f"Getty search failed: {resp.text[:1000]}",
-        )
+        raise HTTPException(resp.status_code, f"Getty search failed: {resp.text}")
 
     return resp.json()
 
 
-def getty_download(asset_id: str) -> tuple[int, Optional[str]]:
+# -------------------------------------------------------------------
+# Getty download (direct API call)
+# -------------------------------------------------------------------
+def getty_download(asset_id: str) -> tuple[int, str]:
     """
-    Call your existing Getty download helper.
-    Expected to:
-      - fetch from Getty delivery URL
-      - store into GCS
-      - return JSON like { "media_url": "gs://bucket/getty/<id>.mp4" }
-    We also surface the raw status/body for debugging.
+    Calls Getty delivery API and returns the download URL.
     """
-    if not GETTY_URL:
-        return 500, "GETTY_URL is not configured"
+    api_key = os.getenv("GETTY_API_KEY")
+    if not api_key:
+        return 500, "GETTY_API_KEY is not configured"
 
-    url = f"{GETTY_URL.rstrip('/')}/download"
-    resp = requests.post(url, json={"asset_id": asset_id}, timeout=300)
+    url = f"https://api.gettyimages.com/v3/downloads/{asset_id}"
+    headers = {"Api-Key": api_key}
 
+    resp = requests.get(url, headers=headers, timeout=60)
     return resp.status_code, resp.text
 
 
@@ -95,10 +86,7 @@ def getty_download(asset_id: str) -> tuple[int, Optional[str]]:
 def health():
     return {
         "status": "ok",
-        "services": {
-            "getty": GETTY_URL,
-            "pipeline": PIPELINE_URL,
-        },
+        "pipeline_url": PIPELINE_URL,
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
 
@@ -109,14 +97,10 @@ def health():
 @app.get("/search-and-run")
 def search_and_run(q: str):
     """
-    1. Search Getty for the query.
-    2. Pick the first asset.
-    3. Ask Getty helper to download it (into GCS).
-    4. Trigger the start-pipeline /run_all endpoint with media_url + asset_id.
-    5. Return a compact summary including pipeline status + preview.
-
-    Audio is treated as fully optional and is handled inside the pipeline;
-    this service does NOT special-case audio at all.
+    1. Search Getty
+    2. Download asset
+    3. Trigger pipeline
+    4. Return summary
     """
 
     # ---------------------------------------------------------------
@@ -125,22 +109,18 @@ def search_and_run(q: str):
     try:
         search_json = getty_search(q)
     except HTTPException as e:
-        return JSONResponse(
-            status_code=e.status_code,
-            content={
-                "stage": "search_failed",
-                "query": q,
-                "asset_id": None,
-                "pipeline_status": None,
-                "pipeline_preview": None,
-                "error": str(e.detail),
-                "download_attempt_status": None,
-                "download_attempt_body": None,
-            },
-        )
+        return {
+            "stage": "search_failed",
+            "query": q,
+            "asset_id": None,
+            "pipeline_status": None,
+            "pipeline_preview": None,
+            "error": str(e.detail),
+            "download_attempt_status": None,
+            "download_attempt_body": None,
+        }
 
-    # Adapt to your actual search response shape
-    assets = search_json.get("assets") or search_json.get("results") or []
+    assets = search_json.get("videos", [])
     if not assets:
         return {
             "stage": "no_results",
@@ -148,21 +128,18 @@ def search_and_run(q: str):
             "asset_id": None,
             "pipeline_status": None,
             "pipeline_preview": None,
-            "error": "No Getty assets found for query.",
+            "error": "No Getty assets found",
             "download_attempt_status": None,
             "download_attempt_body": None,
         }
 
     first = assets[0]
-    asset_id = str(first.get("id") or first.get("asset_id") or "unknown")
+    asset_id = str(first.get("id"))
 
     # ---------------------------------------------------------------
-    # 2. Download via Getty helper
+    # 2. Download Getty asset
     # ---------------------------------------------------------------
     download_status, download_body = getty_download(asset_id)
-
-    download_attempt_status = download_status
-    download_attempt_body = download_body
 
     if download_status != 200:
         return {
@@ -171,75 +148,37 @@ def search_and_run(q: str):
             "asset_id": asset_id,
             "pipeline_status": None,
             "pipeline_preview": None,
-            "error": "Getty download helper failed.",
-            "download_attempt_status": download_attempt_status,
-            "download_attempt_body": download_attempt_body,
+            "error": "Getty download failed",
+            "download_attempt_status": download_status,
+            "download_attempt_body": download_body,
         }
 
-    # Expect the helper to return JSON with media_url
     try:
         download_json = json.loads(download_body)
-    except json.JSONDecodeError:
+        media_url = download_json["uri"]
+    except Exception:
         return {
             "stage": "download_failed",
             "query": q,
             "asset_id": asset_id,
             "pipeline_status": None,
             "pipeline_preview": None,
-            "error": "Download helper returned non-JSON body.",
-            "download_attempt_status": download_attempt_status,
-            "download_attempt_body": download_attempt_body,
-        }
-
-    media_url = download_json.get("media_url")
-    if not media_url:
-        return {
-            "stage": "download_failed",
-            "query": q,
-            "asset_id": asset_id,
-            "pipeline_status": None,
-            "pipeline_preview": None,
-            "error": "Download helper did not return media_url.",
-            "download_attempt_status": download_attempt_status,
-            "download_attempt_body": download_attempt_body,
+            "error": "Invalid Getty download response",
+            "download_attempt_status": download_status,
+            "download_attempt_body": download_body,
         }
 
     # ---------------------------------------------------------------
-    # 3. Trigger pipeline (run_all)
+    # 3. Trigger pipeline
     # ---------------------------------------------------------------
-    if not PIPELINE_URL:
-        return {
-            "stage": "pipeline_misconfigured",
-            "query": q,
-            "asset_id": asset_id,
-            "pipeline_status": None,
-            "pipeline_preview": None,
-            "error": "PIPELINE_URL is not configured.",
-            "download_attempt_status": download_attempt_status,
-            "download_attempt_body": download_attempt_body,
-        }
-
     pipeline_payload = {
         "media_url": media_url,
         "asset_id": asset_id,
         "source": "getty",
-        "media_type": "video",  # adjust if you later support images/audio here
+        "media_type": "video",
     }
 
-    try:
-        pipeline_resp = call_cloud_run(PIPELINE_URL, "run_all", pipeline_payload)
-    except HTTPException as e:
-        return {
-            "stage": "pipeline_error",
-            "query": q,
-            "asset_id": asset_id,
-            "pipeline_status": e.status_code,
-            "pipeline_preview": str(e.detail)[:2000],
-            "error": "Pipeline call failed.",
-            "download_attempt_status": download_attempt_status,
-            "download_attempt_body": download_attempt_body,
-        }
-
+    pipeline_resp = call_cloud_run(PIPELINE_URL, "run_all", pipeline_payload)
     pipeline_status = pipeline_resp.status_code
 
     try:
@@ -248,19 +187,13 @@ def search_and_run(q: str):
     except Exception:
         pipeline_preview = pipeline_resp.text[:2000]
 
-    error = None
-    stage = "complete"
-    if pipeline_status != 200:
-        error = "Pipeline returned non-200 status."
-        stage = "pipeline_error"
-
     return {
-        "stage": stage,
+        "stage": "complete" if pipeline_status == 200 else "pipeline_error",
         "query": q,
         "asset_id": asset_id,
         "pipeline_status": pipeline_status,
         "pipeline_preview": pipeline_preview,
-        "error": error,
-        "download_attempt_status": download_attempt_status,
-        "download_attempt_body": download_attempt_body,
+        "error": None if pipeline_status == 200 else "Pipeline returned non-200",
+        "download_attempt_status": download_status,
+        "download_attempt_body": download_body,
     }
