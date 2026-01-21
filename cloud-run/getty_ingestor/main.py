@@ -19,13 +19,11 @@ PIPELINE_URL = os.getenv("PIPELINE_URL")
 GETTY_API_KEY = os.getenv("GETTY_API_KEY")
 GCS_BUCKET = os.getenv("GCS_BUCKET")  # e.g. df-films-assets-euw1
 
-if not GETTY_API_KEY:
-    raise RuntimeError("GETTY_API_KEY must be set")
-if not GCS_BUCKET:
-    raise RuntimeError("GCS_BUCKET must be set")
-
-storage_client = storage.Client()
-bucket = storage_client.bucket(GCS_BUCKET)
+storage_client = None
+bucket = None
+if GCS_BUCKET:
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(GCS_BUCKET)
 
 
 # ---------------------------------------------------------
@@ -52,6 +50,9 @@ def call_cloud_run(url: str, endpoint: str, json_payload: dict):
 # ---------------------------------------------------------
 @app.get("/search")
 def search(q: str):
+    if not GETTY_API_KEY:
+        raise HTTPException(500, "GETTY_API_KEY is not configured")
+
     url = "https://api.gettyimages.com/v3/search/videos"
     headers = {"Api-Key": GETTY_API_KEY}
 
@@ -75,6 +76,11 @@ def search(q: str):
 # ---------------------------------------------------------
 @app.post("/download")
 def download(payload: dict):
+    if not GETTY_API_KEY:
+        raise HTTPException(500, "GETTY_API_KEY is not configured")
+    if not GCS_BUCKET or bucket is None:
+        raise HTTPException(500, "GCS_BUCKET is not configured")
+
     asset_id = payload.get("asset_id")
     if not asset_id:
         raise HTTPException(400, "asset_id is required")
