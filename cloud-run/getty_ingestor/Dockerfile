@@ -15,11 +15,12 @@ COPY requirements.txt /app/requirements.txt
 # Install Python dependencies
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy ONLY the application code (no hidden files, no stale layers)
-COPY main.py /app/main.py
+# Copy the entire application directory
+COPY . /app
 
 # Expose FastAPI port
 EXPOSE 8080
 
 # Run the service with uvicorn
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+
