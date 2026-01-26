@@ -77,6 +77,8 @@ def search(q: str):
 def download(payload: dict):
     if not GETTY_API_KEY:
         raise HTTPException(500, "GETTY_API_KEY is not configured")
+    if not GETTY_API_SECRET:
+        raise HTTPException(500, "GETTY_API_SECRET is not configured")
     if not GCS_BUCKET or bucket is None:
         raise HTTPException(500, "GCS_BUCKET is not configured")
 
@@ -84,9 +86,13 @@ def download(payload: dict):
     if not asset_id:
         raise HTTPException(400, "asset_id is required")
 
-    # 1. Get Getty delivery URL (POST required)
+    # 1. Correct Getty download call (API key + secret)
     url = f"https://api.gettyimages.com/v3/downloads/{asset_id}"
-    headers = {"Api-Key": GETTY_API_KEY}
+    headers = {
+        "Api-Key": GETTY_API_KEY,
+        "Api-Secret": GETTY_API_SECRET,
+        "Accept": "application/json"
+    }
 
     resp = requests.post(url, headers=headers, timeout=60)
     if resp.status_code != 200:
@@ -117,7 +123,6 @@ def download(payload: dict):
         "media_url": media_url,
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
-
 
 # ---------------------------------------------------------
 # Search + Download + Pipeline
