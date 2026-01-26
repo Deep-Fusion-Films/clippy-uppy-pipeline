@@ -1,5 +1,6 @@
 import os
 import json
+import random
 from datetime import datetime
 
 import requests
@@ -90,16 +91,16 @@ def download(payload: dict):
     # -----------------------------------------------------
     # 1. Try licensed download endpoint first
     # -----------------------------------------------------
+    licensed_url = None
+    licensed_status = None
+    licensed_body = None
+
     download_url = f"https://api.gettyimages.com/v3/downloads/videos/{asset_id}"
     headers = {
         "Api-Key": GETTY_API_KEY,
         "Api-Secret": GETTY_API_SECRET,
         "Accept": "application/json"
     }
-
-    licensed_url = None
-    licensed_status = None
-    licensed_body = None
 
     try:
         resp = requests.post(download_url, headers=headers, timeout=60)
@@ -110,13 +111,12 @@ def download(payload: dict):
             delivery_json = resp.json()
             licensed_url = delivery_json.get("uri")
     except Exception:
-        pass  # fallback below
+        pass
 
     # -----------------------------------------------------
     # 2. If licensed URL unavailable → fallback to preview
     # -----------------------------------------------------
     if not licensed_url:
-        # Fetch asset metadata to extract preview URL
         meta_url = f"https://api.gettyimages.com/v3/videos/{asset_id}"
         meta_headers = {"Api-Key": GETTY_API_KEY}
 
@@ -163,7 +163,7 @@ def download(payload: dict):
 
 
 # ---------------------------------------------------------
-# Search + Download + Pipeline
+# Search + Random Asset + Download + Pipeline
 # ---------------------------------------------------------
 @app.get("/search-and-run")
 def search_and_run(q: str):
@@ -178,8 +178,6 @@ def search_and_run(q: str):
             "pipeline_status": None,
             "pipeline_preview": None,
             "error": str(e),
-            "download_attempt_status": None,
-            "download_attempt_body": None,
         }
 
     assets = search_json.get("assets", [])
@@ -191,19 +189,18 @@ def search_and_run(q: str):
             "pipeline_status": None,
             "pipeline_preview": None,
             "error": "No Getty assets found",
-            "download_attempt_status": None,
-            "download_attempt_body": None,
         }
 
-    first = assets[0]
-    asset_id = str(first.get("id"))
+    # -----------------------------------------------------
+    # RANDOMISE ASSET SELECTION
+    # -----------------------------------------------------
+    selected = random.choice(assets)
+    asset_id = str(selected.get("id"))
 
     # 2. Download Getty asset
     try:
         download_json = download({"asset_id": asset_id})
         media_url = download_json["media_url"]
-        download_status = 200
-        download_body = json.dumps(download_json)
     except HTTPException as e:
         return {
             "stage": "download_failed",
@@ -212,16 +209,17 @@ def search_and_run(q: str):
             "pipeline_status": None,
             "pipeline_preview": None,
             "error": str(e.detail),
-            "download_attempt_status": e.status_code,
-            "download_attempt_body": None,
         }
 
-    # 3. Trigger pipeline
+    # -----------------------------------------------------
+    # 3. Trigger pipeline WITH GETTY METADATA INCLUDED
+    # -----------------------------------------------------
     pipeline_payload = {
         "media_url": media_url,
         "asset_id": asset_id,
         "source": "getty",
         "media_type": "video",
+        "getty_metadata": selected,   # <-- FULL METADATA INCLUDED
     }
 
     pipeline_resp = call_cloud_run(PIPELINE_URL, "run_all", pipeline_payload)
@@ -240,8 +238,6 @@ def search_and_run(q: str):
         "pipeline_status": pipeline_status,
         "pipeline_preview": pipeline_preview,
         "error": None if pipeline_status == 200 else "Pipeline returned non-200",
-        "download_attempt_status": download_status,
-        "download_attempt_body": download_body,
     }
 
 
