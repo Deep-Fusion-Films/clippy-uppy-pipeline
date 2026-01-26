@@ -4,7 +4,6 @@ from datetime import datetime
 
 import requests
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from google.cloud import storage
 
 import google.auth.transport.requests
@@ -85,11 +84,11 @@ def download(payload: dict):
     if not asset_id:
         raise HTTPException(400, "asset_id is required")
 
-    # 1. Get Getty delivery URL
+    # 1. Get Getty delivery URL (POST required)
     url = f"https://api.gettyimages.com/v3/downloads/{asset_id}"
     headers = {"Api-Key": GETTY_API_KEY}
 
-    resp = requests.get(url, headers=headers, timeout=60)
+    resp = requests.post(url, headers=headers, timeout=60)
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, resp.text)
 
