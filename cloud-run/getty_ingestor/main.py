@@ -16,7 +16,8 @@ app = FastAPI()
 # ---------------------------------------------------------
 PIPELINE_URL = os.getenv("PIPELINE_URL")
 GETTY_API_KEY = os.getenv("GETTY_API_KEY")
-GCS_BUCKET = os.getenv("GCS_BUCKET")  # e.g. df-films-assets-euw1
+GETTY_API_SECRET = os.getenv("GETTY_API_SECRET")
+GCS_BUCKET = os.getenv("GCS_BUCKET")
 
 storage_client = None
 bucket = None
@@ -71,7 +72,7 @@ def search(q: str):
 
 
 # ---------------------------------------------------------
-# Getty Download → GCS Upload
+# Licensed Download + Preview Fallback → GCS Upload
 # ---------------------------------------------------------
 @app.post("/download")
 def download(payload: dict):
@@ -86,32 +87,65 @@ def download(payload: dict):
     if not asset_id:
         raise HTTPException(400, "asset_id is required")
 
-    # 1. Correct Getty download call (API key + secret)
-    url = f"https://api.gettyimages.com/v3/downloads/{asset_id}"
+    # -----------------------------------------------------
+    # 1. Try licensed download endpoint first
+    # -----------------------------------------------------
+    download_url = f"https://api.gettyimages.com/v3/downloads/videos/{asset_id}"
     headers = {
         "Api-Key": GETTY_API_KEY,
         "Api-Secret": GETTY_API_SECRET,
         "Accept": "application/json"
     }
 
-    resp = requests.post(url, headers=headers, timeout=60)
-    if resp.status_code != 200:
-        raise HTTPException(resp.status_code, resp.text)
+    licensed_url = None
+    licensed_status = None
+    licensed_body = None
 
     try:
-        delivery_json = resp.json()
-        delivery_url = delivery_json["uri"]
-    except Exception:
-        raise HTTPException(500, "Invalid Getty download response")
+        resp = requests.post(download_url, headers=headers, timeout=60)
+        licensed_status = resp.status_code
+        licensed_body = resp.text
 
-    # 2. Download the media file
-    media_resp = requests.get(delivery_url, timeout=300)
+        if resp.status_code == 200:
+            delivery_json = resp.json()
+            licensed_url = delivery_json.get("uri")
+    except Exception:
+        pass  # fallback below
+
+    # -----------------------------------------------------
+    # 2. If licensed URL unavailable → fallback to preview
+    # -----------------------------------------------------
+    if not licensed_url:
+        # Fetch asset metadata to extract preview URL
+        meta_url = f"https://api.gettyimages.com/v3/videos/{asset_id}"
+        meta_headers = {"Api-Key": GETTY_API_KEY}
+
+        meta_resp = requests.get(meta_url, headers=meta_headers, timeout=60)
+        if meta_resp.status_code != 200:
+            raise HTTPException(meta_resp.status_code, "Failed to fetch preview metadata")
+
+        try:
+            meta_json = meta_resp.json()
+            preview_url = meta_json["display_sizes"][0]["uri"]
+        except Exception:
+            raise HTTPException(500, "No preview URL available for this asset")
+
+        final_url = preview_url
+    else:
+        final_url = licensed_url
+
+    # -----------------------------------------------------
+    # 3. Download the media file
+    # -----------------------------------------------------
+    media_resp = requests.get(final_url, timeout=300)
     if media_resp.status_code != 200:
         raise HTTPException(media_resp.status_code, "Failed to download media")
 
     media_bytes = media_resp.content
 
-    # 3. Upload to GCS
+    # -----------------------------------------------------
+    # 4. Upload to GCS
+    # -----------------------------------------------------
     object_name = f"getty/{asset_id}.mp4"
     blob = bucket.blob(object_name)
     blob.upload_from_string(media_bytes, content_type="video/mp4")
@@ -121,8 +155,12 @@ def download(payload: dict):
     return {
         "asset_id": asset_id,
         "media_url": media_url,
+        "licensed_download_status": licensed_status,
+        "licensed_download_body": licensed_body,
+        "used_preview_fallback": licensed_url is None,
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
+
 
 # ---------------------------------------------------------
 # Search + Download + Pipeline
