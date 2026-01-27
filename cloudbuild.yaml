@@ -8,8 +8,10 @@ steps:
 # --- Build & Deploy start_pipeline ---
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest', './cloud-run/start_pipeline']
+
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest']
+
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
@@ -28,8 +30,10 @@ steps:
 # --- Build & Deploy transcode ---
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest', './cloud-run/transcode']
+
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest']
+
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
@@ -49,8 +53,10 @@ steps:
 # --- Build & Deploy transcribe ---
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest', './cloud-run/transcribe']
+
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcribe:latest']
+
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
@@ -70,8 +76,10 @@ steps:
 # --- Build & Deploy sample_frames ---
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest', './cloud-run/sample_frames']
+
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/sample_frames:latest']
+
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
@@ -88,7 +96,7 @@ steps:
     '--memory','2Gi'
   ]
 
-# --- Build & Deploy getty_ingestor (NEW) ---
+# --- Build & Deploy getty_ingestor ---
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_ingestor:latest', './cloud-run/getty_ingestor']
 
@@ -112,12 +120,13 @@ steps:
     '--set-env-vars','GETTY_API_KEY=r94mr4tht9hkpj86b94hag3p,GETTY_API_SECRET=yceVfv9XJAgfWcJLMLj7,START_PIPELINE_URL=https://start-pipeline-863025961248.europe-west1.run.app'
   ]
 
-
-# --- Build & Deploy gemini_enricher (RENAMED) ---
+# --- Build & Deploy gemini_enricher ---
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/gemini_enricher:latest', './cloud-run/gemini_enricher']
+
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/gemini_enricher:latest']
+
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
@@ -137,8 +146,10 @@ steps:
 # --- Build & Deploy store_metadata ---
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest', './cloud-run/store_metadata']
+
 - name: 'gcr.io/cloud-builders/docker'
   args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest']
+
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
   entrypoint: gcloud
   args: [
@@ -155,6 +166,27 @@ steps:
     '--memory','1Gi'
   ]
 
+# --- Final Slack Notification (fires once, always) ---
+- name: 'curlimages/curl'
+  entrypoint: curl
+  args:
+    - -X
+    - POST
+    - -H
+    - "Content-type: application/json"
+    - --data
+    - >
+      {"text":"Clippy‑uppy Cloud Build completed. Status: $BUILD_STATUS\nBuild ID: $BUILD_ID\nProject: $PROJECT_ID"}
+    - $(SLACK_WEBHOOK_URL)
+  secretEnv: ["SLACK_WEBHOOK_URL"]
+  # ensure it runs even if previous steps fail
+  allowFailure: true
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/SLACK_WEBHOOK_URL/versions/latest
+      env: SLACK_WEBHOOK_URL
+
 images:
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest'
@@ -163,4 +195,3 @@ images:
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/getty_ingestor:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/gemini_enricher:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/store_metadata:latest'
-
