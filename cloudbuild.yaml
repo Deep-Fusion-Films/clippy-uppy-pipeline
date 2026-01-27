@@ -166,7 +166,7 @@ steps:
     '--memory','1Gi'
   ]
 
-# --- Final Slack Notification (fires once, always) ---
+# --- Final Slack Notification (runs even if build fails) ---
 - name: 'curlimages/curl'
   entrypoint: /bin/sh
   args:
