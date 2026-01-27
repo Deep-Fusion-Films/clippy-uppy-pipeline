@@ -166,22 +166,6 @@ steps:
     '--memory','1Gi'
   ]
 
-# --- Final Slack Notification (runs even if build fails) ---
-- name: 'curlimages/curl'
-  entrypoint: /bin/sh
-  args:
-    - -c
-    - |
-      STATUS="${BUILD_STATUS}"
-      ID="${BUILD_ID}"
-      PROJECT="${PROJECT_ID}"
-
-      curl -X POST -H "Content-type: application/json" \
-      --data "{\"text\":\"Clippy‑uppy Cloud Build completed.\nStatus: ${STATUS}\nBuild ID: ${ID}\nProject: ${PROJECT}\"}" \
-      "${SLACK_WEBHOOK_URL}"
-  secretEnv: ["SLACK_WEBHOOK_URL"]
-  allowFailure: true
-
 images:
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/start_pipeline:latest'
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/transcode:latest'
