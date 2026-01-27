@@ -168,18 +168,14 @@ steps:
 
 # --- Final Slack Notification (fires once, always) ---
 - name: 'curlimages/curl'
-  entrypoint: curl
+  entrypoint: /bin/sh
   args:
-    - -X
-    - POST
-    - -H
-    - "Content-type: application/json"
-    - --data
-    - >
-      {"text":"Clippy‑uppy Cloud Build completed. Status: $BUILD_STATUS\nBuild ID: $BUILD_ID\nProject: $PROJECT_ID"}
-    - $(SLACK_WEBHOOK_URL)
+    - -c
+    - |
+      curl -X POST -H "Content-type: application/json" \
+      --data "{\"text\":\"Clippy‑uppy Cloud Build completed.\nStatus: $BUILD_STATUS\nBuild ID: $BUILD_ID\nProject: $PROJECT_ID\"}" \
+      "$SLACK_WEBHOOK_URL"
   secretEnv: ["SLACK_WEBHOOK_URL"]
-  # ensure it runs even if previous steps fail
   allowFailure: true
 
 availableSecrets:
