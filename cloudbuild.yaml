@@ -173,8 +173,8 @@ steps:
     - -c
     - |
       curl -X POST -H "Content-type: application/json" \
-      --data "{\"text\":\"Clippy‑uppy Cloud Build completed.\nStatus: $BUILD_STATUS\nBuild ID: $BUILD_ID\nProject: $PROJECT_ID\"}" \
-      "$SLACK_WEBHOOK_URL"
+      --data "{\"text\":\"Clippy‑uppy Cloud Build completed.\nStatus: ${BUILD_STATUS}\nBuild ID: ${BUILD_ID}\nProject: ${PROJECT_ID}\"}" \
+      "${SLACK_WEBHOOK_URL}"
   secretEnv: ["SLACK_WEBHOOK_URL"]
   allowFailure: true
 
