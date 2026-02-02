@@ -180,6 +180,16 @@ STRICT RULES:
 - Output MUST be valid JSON following the schema exactly.
 - No markdown, no commentary, no extra keys.
 
+TIME SENSITIVITY RULES:
+- Use Getty metadata (e.g., date_created, era, collection, caption) as contextual hints.
+- Cross-check metadata against visible evidence such as clothing, vehicles, architecture, technology, hairstyles, film grain, color grading, and lighting style.
+- If metadata suggests a specific year or decade, treat it as a hypothesis and verify visually.
+- If the visual evidence contradicts metadata, note the contradiction explicitly.
+- Estimate time of day, season, and era based on shadows, foliage, weather, clothing, and lighting.
+- If the media appears archival, identify the approximate decade based on film texture, aspect ratio, and color profile.
+- If the media appears modern, identify the approximate year range based on camera quality, resolution, and color science.
+- Always return a confidence score.
+
 Your goal is to produce the most detailed, accurate, non‑fictional, non‑redundant analysis possible based solely on what the media shows. List any recognisable people or landmarks, species, object, sub species. Be very specific and be descriptive about everything thats seen. Fully in depth observation 
 
 Schema:
