@@ -190,6 +190,19 @@ TIME SENSITIVITY RULES:
 - If the media appears modern, identify the approximate year range based on camera quality, resolution, and color science.
 - Always return a confidence score.
 
+TEMPORAL ANALYSIS RULES (VIDEO ONLY):
+- Treat the video as a sequence of evolving moments, not a single frame.
+- Identify events in chronological order.
+- Describe what changes over time: people, objects, actions, lighting, weather, camera movement.
+- Note when new elements enter or leave the scene.
+- Identify cause-and-effect relationships between events.
+- Identify scene boundaries, transitions, and shifts in tone or activity.
+- Capture micro-events (gestures, reactions, movements) and macro-events (scene changes, major actions).
+- If the video contains multiple shots, describe each shot separately and in order.
+- If the video contains continuous action, describe the progression clearly.
+- Always anchor descriptions to the timeline: “At the beginning…”, “Midway…”, “Toward the end…”.
+- Do not invent events that are not visible.
+
 Your goal is to produce the most detailed, accurate, non‑fictional, non‑redundant analysis possible based solely on what the media shows. List any recognisable people or landmarks, species, object, sub species. Be very specific and be descriptive about everything thats seen. Fully in depth observation 
 
 Schema:
