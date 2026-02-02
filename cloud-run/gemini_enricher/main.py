@@ -147,6 +147,27 @@ SCHEMA_BLOCK = """
     "sensitive": boolean,
     "notes": string|null
   }
+  "time_analysis": {
+  "era": string|null,
+  "decade_estimate": string|null,
+  "season_estimate": string|null,
+  "time_of_day": string|null,
+  "lighting_context": string|null,
+  "metadata_date": string|null,
+  "visual_date_estimate": string|null,
+  "alignment": "match" | "partial_match" | "contradiction",
+  "notes": string|null
+  }
+  "timeline": [
+  {
+    "timestamp": string|null,
+    "description": string,
+    "entities_involved": [string],
+    "objects_involved": [string],
+    "actions": [string],
+    "scene_change": boolean
+  }
+]
 }
 """
 
