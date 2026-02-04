@@ -179,7 +179,7 @@ steps:
   args:
     [
       "run", "jobs", "deploy", "batch-runner",
-      "--image", "gcr.io/$PROJECT_ID/batch-runner",
+      "--image ${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/batch-runner:latest",
       "--region", "europe-west1",
       "--set-env-vars", "BUCKET=df-films-assets-euw1",
       "--set-env-vars", "FOLDER=newsflare/newsflare_upload/",
