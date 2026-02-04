@@ -228,9 +228,15 @@ async def run_all(req: Request):
 
         audio_status = merged.get("status", {}).get("audio")
 
-        # Normalise audio status
-        if audio_status in [None, "audio_extraction_failed", "no_audio_present"]:
-            audio_status = "no_audio"
+# Normalise audio status
+if audio_status in [None, "audio_extraction_failed", "no_audio_present"]:
+    audio_status = "no_audio"
+
+# If no audio is present, drop FFmpeg stderr noise
+if audio_status == "no_audio":
+    reason = merged.get("reason", {})
+    if "audio_reason" in reason:
+        del reason["audio_reason"]
 
     # -----------------------------------------------------
     # STEP 2 — TRANSCRIBE
