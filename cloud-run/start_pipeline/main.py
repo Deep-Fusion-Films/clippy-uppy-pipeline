@@ -19,7 +19,6 @@ FRAMES_URL = os.getenv("FRAMES_URL")
 ENRICHER_URL = os.getenv("ENRICHER_URL")
 STORE_URL = os.getenv("STORE_URL")
 
-# Enforce required URLs (Option B)
 REQUIRED_ENV = {
     "GETTY_URL": GETTY_URL,
     "TRANSCODE_URL": TRANSCODE_URL,
@@ -228,15 +227,8 @@ async def run_all(req: Request):
 
         audio_status = merged.get("status", {}).get("audio")
 
-# Normalise audio status
-if audio_status in [None, "audio_extraction_failed", "no_audio_present"]:
-    audio_status = "no_audio"
-
-# If no audio is present, drop FFmpeg stderr noise
-if audio_status == "no_audio":
-    reason = merged.get("reason", {})
-    if "audio_reason" in reason:
-        del reason["audio_reason"]
+        if audio_status in [None, "audio_extraction_failed", "no_audio_present"]:
+            audio_status = "no_audio"
 
     # -----------------------------------------------------
     # STEP 2 — TRANSCRIBE
@@ -245,9 +237,8 @@ if audio_status == "no_audio":
 
     if asset_type == "audio":
         should_transcribe = True
-    elif asset_type == "video":
-        if audio_status == "extracted":
-            should_transcribe = True
+    elif asset_type == "video" and audio_status == "extracted":
+        should_transcribe = True
 
     if should_transcribe:
         transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", merged)
