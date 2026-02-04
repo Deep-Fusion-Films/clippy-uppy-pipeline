@@ -257,12 +257,13 @@ if asset_type == "video" and "media_bytes" not in payload:
     # - For video assets: only if audio was actually extracted
     should_transcribe = False
 
-    if asset_type == "audio":
+if asset_type == "audio":
+    should_transcribe = True
+elif asset_type == "video":
+    # Only transcribe if transcoder successfully extracted audio
+    if audio_status == "extracted":
         should_transcribe = True
-    elif asset_type == "video":
-        # Only transcribe if transcoder reported usable audio
-        if audio_status == "extracted":
-            should_transcribe = True
+
 
     if should_transcribe:
         transcribe_json = call_service(TRANSCRIBE_URL, "transcribe", merged)
