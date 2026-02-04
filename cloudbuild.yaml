@@ -170,10 +170,10 @@ steps:
 # Batch Runner (Cloud Run Job)
 # ---------------------------------------------------------
 - name: gcr.io/cloud-builders/docker
-  args: ["build", "-t", "gcr.io/$PROJECT_ID/batch-runner", "batch-runner"]
+  args: ["build", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/batch-runner:latest", "batch-runner"]
 
 - name: gcr.io/cloud-builders/docker
-  args: ["push", "gcr.io/$PROJECT_ID/batch-runner"]
+  args: ["push", "${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/batch-runner:latest"]
 
 - name: gcr.io/cloud-builders/gcloud
   args:
