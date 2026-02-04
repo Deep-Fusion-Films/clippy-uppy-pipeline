@@ -241,15 +241,16 @@ async def run_all(req: Request):
     audio_status = None  # track audio status from transcoder for video assets
 
     # Step 1: Transcode (video only, non-byte Getty/GCS/local)
-    if asset_type == "video" and "media_bytes" not in payload:
-        transcode_json = call_service(TRANSCODE_URL, "transcode", merged)
-        merged = deep_merge(merged, transcode_json)
+if asset_type == "video" and "media_bytes" not in payload:
+    transcode_json = call_service(TRANSCODE_URL, "transcode", merged)
+    merged = deep_merge(merged, transcode_json)
 
-        # Try to read audio status from transcoder response
-        audio_status = (
-            merged.get("status", {})
-            .get("audio")
-        )
+    # Normalise audio status from transcoder
+    audio_status = merged.get("status", {}).get("audio")
+
+    # Treat missing/failed/no-audio as a single unified state
+    if audio_status in [None, "audio_extraction_failed", "no_audio_present"]:
+        audio_status = "no_audio"
 
     # Step 2: Transcribe
     # - For pure audio assets: always attempt transcription
