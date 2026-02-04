@@ -11,8 +11,8 @@ app = FastAPI()
 # --------------------------------------------------------------------
 # Environment variables
 # --------------------------------------------------------------------
-ASSETS_BUCKET = os.getenv("ASSETS_BUCKET")          # e.g. gs://df-films-assets-euw1
-TRANSCODED_BUCKET = os.getenv("TRANSCODED_BUCKET")  # e.g. gs://df-films-assets-euw1
+ASSETS_BUCKET = os.getenv("ASSETS_BUCKET")
+TRANSCODED_BUCKET = os.getenv("TRANSCODED_BUCKET")
 
 if not ASSETS_BUCKET or not TRANSCODED_BUCKET:
     raise RuntimeError("ASSETS_BUCKET and TRANSCODED_BUCKET must be set.")
@@ -24,16 +24,10 @@ storage_client = storage.Client()
 # Helpers
 # --------------------------------------------------------------------
 def normalize_bucket(bucket_uri: str) -> str:
-    """Convert gs://bucket → bucket."""
     return bucket_uri.replace("gs://", "")
 
 
 def extract_blob_name(full_gs_url: str) -> str:
-    """
-    Convert:
-        gs://bucket/getty/123.mp4
-    →   getty/123.mp4
-    """
     if not full_gs_url.startswith("gs://"):
         raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {full_gs_url}")
 
@@ -42,7 +36,7 @@ def extract_blob_name(full_gs_url: str) -> str:
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {full_gs_url}")
 
-    return parts[1]  # object path only
+    return parts[1]
 
 
 def download_from_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
@@ -69,10 +63,6 @@ def upload_to_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
 
 
 def probe_video_metadata(local_path: str) -> dict:
-    """
-    Extract technical metadata for video from a (presumably valid) media file.
-    Raises HTTPException only if ffprobe itself is missing or misbehaves.
-    """
     try:
         probe = subprocess.run(
             [
@@ -116,11 +106,6 @@ def probe_video_metadata(local_path: str) -> dict:
 
 
 def probe_audio_metadata(local_path: str) -> dict | None:
-    """
-    Extract technical metadata for audio, if present.
-    Returns dict if audio stream exists and is readable, otherwise None.
-    Never raises for asset-level issues; only for ffprobe missing.
-    """
     try:
         proc = subprocess.run(
             [
@@ -140,7 +125,6 @@ def probe_audio_metadata(local_path: str) -> dict | None:
         raise HTTPException(status_code=500, detail="ffprobe binary not found.")
 
     if proc.returncode != 0:
-        # Treat as "no usable audio metadata"
         return None
 
     try:
@@ -166,10 +150,6 @@ def probe_audio_metadata(local_path: str) -> dict | None:
 
 
 def safe_probe_input(local_path: str) -> tuple[bool, str | None]:
-    """
-    Lightweight pre-flight check: is this a valid media file ffprobe can read?
-    Returns (is_valid, error_message_if_any).
-    """
     try:
         proc = subprocess.run(
             [
@@ -196,9 +176,6 @@ def safe_probe_input(local_path: str) -> tuple[bool, str | None]:
 
 
 def has_audio_stream(local_path: str) -> bool:
-    """
-    Check if the input file has at least one audio stream.
-    """
     try:
         proc = subprocess.run(
             [
@@ -215,10 +192,6 @@ def has_audio_stream(local_path: str) -> bool:
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="ffprobe binary not found.")
 
-    if proc.returncode != 0:
-        return False
-
-    # If ffprobe prints at least one line, there is an audio stream
     return bool(proc.stdout.strip())
 
 
@@ -242,45 +215,40 @@ async def transcode(req: Request):
     data = await req.json()
 
     # ------------------------------------------------------------
-    # MODE 1: Getty (asset_id + paths.raw)
+    # MODE 1 — Getty
     # ------------------------------------------------------------
     if "asset_id" in data and "paths" in data and "raw" in data["paths"]:
         asset_id = data["asset_id"]
-        raw_path = data["paths"]["raw"]  # full gs://bucket/getty/<id>.mp4
-
+        raw_path = data["paths"]["raw"]
         blob_name = extract_blob_name(raw_path)
-        local_in = f"/tmp/{asset_id}.mp4"
-        local_video_out = f"/tmp/{asset_id}_normalized.mp4"
-        local_audio_out = f"/tmp/{asset_id}_audio.mp3"
 
     # ------------------------------------------------------------
-    # MODE 2: Local GCS (file_name + bucket)
+    # MODE 2 — Local GCS
     # ------------------------------------------------------------
     elif "file_name" in data and "bucket" in data:
-        file_name = data["file_name"]      # e.g. raw/CE_025_0.mp4
-        bucket = data["bucket"]            # e.g. df-films-assets-euw1
-
+        file_name = data["file_name"]
+        bucket = data["bucket"]
         asset_id = os.path.splitext(os.path.basename(file_name))[0]
         raw_path = f"gs://{bucket}/{file_name}"
-
         blob_name = file_name
-        local_in = f"/tmp/{asset_id}.mp4"
-        local_video_out = f"/tmp/{asset_id}_normalized.mp4"
-        local_audio_out = f"/tmp/{asset_id}_audio.mp3"
 
     else:
         raise HTTPException(
             status_code=400,
-            detail="Provide either asset_id+paths.raw (Getty) OR file_name+bucket (local)",
+            detail="Provide either asset_id+paths.raw OR file_name+bucket",
         )
 
+    local_in = f"/tmp/{asset_id}.mp4"
+    local_video_out = f"/tmp/{asset_id}_normalized.mp4"
+    local_audio_out = f"/tmp/{asset_id}_audio.mp3"
+
     # ------------------------------------------------------------
-    # Download original video
+    # Download
     # ------------------------------------------------------------
     download_from_gcs(ASSETS_BUCKET, blob_name, local_in)
 
     # ------------------------------------------------------------
-    # Pre-flight: validate input with ffprobe
+    # Validate input
     # ------------------------------------------------------------
     is_valid, probe_error = safe_probe_input(local_in)
     if not is_valid:
@@ -288,25 +256,16 @@ async def transcode(req: Request):
             "asset_id": asset_id,
             "paths": {
                 "raw": raw_path,
-                "transcoded": {
-                    "video": None,
-                    "audio": None,
-                },
+                "transcoded": {"video": None, "audio": None},
             },
-            "technical": {
-                "video": None,
-                "audio": None,
-            },
-            "status": {
-                "video": "skipped_invalid_input",
-                "audio": "skipped_invalid_input",
-            },
+            "technical": {"video": None, "audio": None},
+            "status": {"video": "skipped_invalid_input", "audio": "skipped_invalid_input"},
             "reason": f"ffprobe could not read input: {probe_error}",
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
 
     # ------------------------------------------------------------
-    # Transcode video using ffmpeg
+    # Video transcode
     # ------------------------------------------------------------
     try:
         ffmpeg_video = subprocess.run(
@@ -316,7 +275,7 @@ async def transcode(req: Request):
                 "-i", local_in,
                 "-c:v", "mpeg4",
                 "-qscale:v", "2",
-                "-an",  # drop audio in this pass
+                "-an",
                 local_video_out,
             ],
             capture_output=True,
@@ -334,7 +293,7 @@ async def transcode(req: Request):
         local_video_out = None
 
     # ------------------------------------------------------------
-    # Audio extraction (optional, non-blocking)
+    # Audio extraction (fixed behaviour)
     # ------------------------------------------------------------
     audio_status = "not_attempted"
     audio_reason = None
@@ -360,7 +319,6 @@ async def transcode(req: Request):
             raise HTTPException(status_code=500, detail="ffmpeg binary not found.")
 
         if ffmpeg_audio.returncode == 0:
-            # Upload audio
             audio_blob_name = f"transcoded/{asset_id}_audio.mp3"
             audio_gcs_path = upload_to_gcs(TRANSCODED_BUCKET, audio_blob_name, local_audio_out)
             audio_status = "extracted"
@@ -368,11 +326,14 @@ async def transcode(req: Request):
         else:
             audio_status = "audio_extraction_failed"
             audio_reason = ffmpeg_audio.stderr[:2000]
+
     else:
+        # ⭐ FIX: silent videos are SUCCESS, not failure
         audio_status = "no_audio_present"
+        audio_reason = None
 
     # ------------------------------------------------------------
-    # Upload transcoded video (if successful)
+    # Upload video
     # ------------------------------------------------------------
     video_gcs_path = None
     video_technical = None
@@ -383,7 +344,7 @@ async def transcode(req: Request):
         video_technical = probe_video_metadata(local_video_out)
 
     # ------------------------------------------------------------
-    # Response (organised / nested)
+    # Build response
     # ------------------------------------------------------------
     response = {
         "asset_id": asset_id,
@@ -405,12 +366,12 @@ async def transcode(req: Request):
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
 
-    # Attach reasons only when they exist
     reasons = {}
     if video_reason:
         reasons["video_reason"] = video_reason
     if audio_reason:
         reasons["audio_reason"] = audio_reason
+
     if reasons:
         response["reason"] = reasons
 
