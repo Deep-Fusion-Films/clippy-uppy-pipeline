@@ -12,7 +12,7 @@ from google.cloud import storage, firestore
 app = FastAPI()
 
 # -------------------------------------------------------------------
-# Vertex AI Gemini client (Cloud Run service account auth)
+# Gemini client
 # -------------------------------------------------------------------
 client = genai.Client(
     vertexai=True,
@@ -22,19 +22,17 @@ client = genai.Client(
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
-# Cloud Storage + Firestore clients
 storage_client = storage.Client()
 firestore_client = firestore.Client()
 
-# Bucket where enriched metadata JSON will be stored
 METADATA_BUCKET = os.getenv("METADATA_BUCKET", "df-films-metadata-euw1")
 
-# Max inline video size before switching to frame sampling (20 MB)
-MAX_VIDEO_BYTES = 20 * 1024 * 1024
+# Threshold: above this, we use frame sampling
+MAX_VIDEO_BYTES = 20 * 1024 * 1024  # 20 MB
 
 
 # -------------------------------------------------------------------
-# Warm‑up endpoint
+# Warmup
 # -------------------------------------------------------------------
 @app.get("/warmup")
 def warmup():
@@ -46,28 +44,26 @@ def warmup():
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Warmup failed: {e}")
+        raise HTTPException(500, f"Warmup failed: {e}")
 
 
 # -------------------------------------------------------------------
-# Downscale video using FFmpeg
+# Downscale video
 # -------------------------------------------------------------------
-def downscale_video(media_bytes: bytes, resolution: str = "480") -> bytes:
+def downscale_video(media_bytes: bytes, resolution: str = "720") -> bytes:
     try:
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as input_file:
-            input_file.write(media_bytes)
-            input_path = input_file.name
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(media_bytes)
+            input_path = f.name
 
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as output_file:
-            output_path = output_file.name
-
-        scale_filter = f"scale=-2:{resolution}"
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            output_path = f.name
 
         cmd = [
             "ffmpeg",
             "-y",
             "-i", input_path,
-            "-vf", scale_filter,
+            "-vf", f"scale=-2:{resolution}",
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-crf", "28",
@@ -81,20 +77,17 @@ def downscale_video(media_bytes: bytes, resolution: str = "480") -> bytes:
             return f.read()
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Video downscaling failed: {e}",
-        )
+        raise HTTPException(500, f"Video downscaling failed: {e}")
 
 
 # -------------------------------------------------------------------
-# Extract frames at fixed FPS using FFmpeg
+# Extract frames at 5 FPS
 # -------------------------------------------------------------------
-def extract_frames(media_bytes: bytes, fps: int = 5) -> list[bytes]:
+def extract_frames(media_bytes: bytes, fps: int = 5) -> list:
     try:
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as input_file:
-            input_file.write(media_bytes)
-            input_path = input_file.name
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(media_bytes)
+            input_path = f.name
 
         output_dir = tempfile.mkdtemp()
         output_pattern = os.path.join(output_dir, "frame_%04d.jpg")
@@ -110,90 +103,64 @@ def extract_frames(media_bytes: bytes, fps: int = 5) -> list[bytes]:
 
         subprocess.run(cmd, check=True)
 
-        frames: list[bytes] = []
+        frames = []
         for fname in sorted(os.listdir(output_dir)):
             if fname.endswith(".jpg"):
                 with open(os.path.join(output_dir, fname), "rb") as f:
                     frames.append(f.read())
 
         if not frames:
-            raise HTTPException(
-                status_code=500,
-                detail="Frame extraction produced no frames.",
-            )
+            raise HTTPException(500, "Frame extraction produced no frames")
 
         return frames
 
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Frame extraction failed: {e}",
-        )
+        raise HTTPException(500, f"Frame extraction failed: {e}")
 
 
 # -------------------------------------------------------------------
-# Load bytes from GCS
+# Load from GCS
 # -------------------------------------------------------------------
 def load_from_gcs(bucket: str, file_name: str) -> bytes:
     try:
-        bucket_obj = storage_client.bucket(bucket)
-        blob = bucket_obj.blob(file_name)
+        blob = storage_client.bucket(bucket).blob(file_name)
 
         if not blob.exists():
-            raise HTTPException(
-                status_code=404,
-                detail=f"File not found in GCS: gs://{bucket}/{file_name}",
-            )
+            raise HTTPException(404, f"File not found: gs://{bucket}/{file_name}")
 
-        file_bytes = blob.download_as_bytes()
-        if not file_bytes:
-            raise HTTPException(
-                status_code=500,
-                detail=f"File in GCS is empty: gs://{bucket}/{file_name}",
-            )
+        data = blob.download_as_bytes()
+        if not data:
+            raise HTTPException(500, f"File empty: gs://{bucket}/{file_name}")
 
-        return file_bytes
+        return data
 
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to load file from GCS: {e}",
-        )
+        raise HTTPException(500, f"Failed to load file from GCS: {e}")
 
 
 # -------------------------------------------------------------------
-# Strip markdown fences
+# Strip helpers
 # -------------------------------------------------------------------
 def strip_markdown_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
-        parts = text.split("```", 1)
-        if len(parts) > 1:
-            text = parts[1]
+        text = text.split("```", 1)[1]
         if "```" in text:
             text = text.rsplit("```", 1)[0]
     return text.strip()
 
 
-# -------------------------------------------------------------------
-# Strip leading 'json'
-# -------------------------------------------------------------------
 def strip_leading_json_token(text: str) -> str:
     cleaned = text.strip()
     if cleaned.lower().startswith("json"):
-        cleaned = cleaned[4:].strip()
+        return cleaned[4:].strip()
     return cleaned
 
 
 # -------------------------------------------------------------------
-# Optimized Schema Block (unchanged)
+# Schema (unchanged)
 # -------------------------------------------------------------------
-SCHEMA_BLOCK = """
-{
+SCHEMA_BLOCK = """{
   "description_long": string,
   "entities": {
     "people": [
@@ -271,8 +238,7 @@ SCHEMA_BLOCK = """
       "scene_change": boolean
     }
   ]
-}
-"""
+}"""
 
 
 # -------------------------------------------------------------------
@@ -327,7 +293,7 @@ TEMPORAL ANALYSIS RULES (VIDEO ONLY):
 - Always anchor descriptions to the timeline: “At the beginning…”, “Midway…”, “Toward the end…”.
 - Do not invent events that are not visible.
 
-Your goal is to produce the most detailed, accurate, non‑fictional, non‑redundant analysis possible based solely on what the media shows. List any recognisable people or landmarks, species, object, sub species. Be very specific and be descriptive about everything thats seen. Fully in depth observation 
+Your goal is to produce the most detailed, accurate, non‑fictional, non‑redundant analysis possible based solely on what the media shows.
 
 Schema:
 {{schema}}
@@ -343,73 +309,53 @@ Metadata (weak hints only):
 
 
 # -------------------------------------------------------------------
-# Extract text from Gemini response
+# Extract text
 # -------------------------------------------------------------------
 def extract_text(response) -> str:
     if hasattr(response, "text") and isinstance(response.text, str):
         return response.text
 
     try:
-        candidates = getattr(response, "candidates", None)
-        if candidates:
-            parts = candidates[0].content.parts
-            for part in parts:
-                if hasattr(part, "text"):
-                    return part.text
+        parts = response.candidates[0].content.parts
+        for p in parts:
+            if hasattr(p, "text"):
+                return p.text
     except Exception:
         pass
 
-    raise HTTPException(
-        status_code=500,
-        detail="Model response did not contain text output.",
-    )
+    raise HTTPException(500, "Model response did not contain text output")
 
 
 # -------------------------------------------------------------------
-# Gemini inference (single media: image or video)
+# Gemini single-media
 # -------------------------------------------------------------------
 def run_gemini(prompt: str, media_bytes: bytes, media_type: str) -> dict:
     try:
         mime = "video/mp4" if media_type == "video" else "image/jpeg"
 
-        media_part = {
-            "inline_data": {
-                "mime_type": mime,
-                "data": media_bytes,
-            }
-        }
-
         response = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[
                 {"text": prompt},
-                media_part,
+                {"inline_data": {"mime_type": mime, "data": media_bytes}},
             ],
         )
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error calling Gemini model: {e}",
-        )
+        raise HTTPException(500, f"Error calling Gemini: {e}")
 
-    text = extract_text(response)
-    text = strip_markdown_fences(text)
-    text = strip_leading_json_token(text)
+    text = strip_leading_json_token(strip_markdown_fences(extract_text(response)))
 
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Model returned invalid JSON: {text}",
-        )
+    except:
+        raise HTTPException(500, f"Invalid JSON from model: {text}")
 
 
 # -------------------------------------------------------------------
-# Gemini inference (multi-image: sampled frames)
+# Gemini multi-image (frames)
 # -------------------------------------------------------------------
-def run_gemini_multi(prompt: str, frames: list[bytes]) -> dict:
+def run_gemini_multi(prompt: str, frames: list) -> dict:
     try:
         contents = [{"text": prompt}]
         for frame in frames:
@@ -426,58 +372,36 @@ def run_gemini_multi(prompt: str, frames: list[bytes]) -> dict:
         )
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error calling Gemini model (multi): {e}",
-        )
+        raise HTTPException(500, f"Error calling Gemini (multi): {e}")
 
-    text = extract_text(response)
-    text = strip_markdown_fences(text)
-    text = strip_leading_json_token(text)
+    text = strip_leading_json_token(strip_markdown_fences(extract_text(response)))
 
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Model returned invalid JSON: {text}",
-        )
+    except:
+        raise HTTPException(500, f"Invalid JSON from model: {text}")
 
 
 # -------------------------------------------------------------------
-# Write metadata to GCS
+# Write metadata
 # -------------------------------------------------------------------
 def write_metadata_to_gcs(asset_id: str, data: dict):
     try:
-        bucket = storage_client.bucket(METADATA_BUCKET)
-        blob = bucket.blob(f"{asset_id}.json")
-        blob.upload_from_string(
-            json.dumps(data, indent=2),
-            content_type="application/json",
-        )
+        blob = storage_client.bucket(METADATA_BUCKET).blob(f"{asset_id}.json")
+        blob.upload_from_string(json.dumps(data, indent=2), content_type="application/json")
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to write metadata to GCS: {e}",
-        )
+        raise HTTPException(500, f"Failed to write metadata to GCS: {e}")
 
 
-# -------------------------------------------------------------------
-# Write metadata to Firestore
-# -------------------------------------------------------------------
 def write_metadata_to_firestore(asset_id: str, data: dict):
     try:
-        doc_ref = firestore_client.collection("assets").document(asset_id)
-        doc_ref.set(data)
+        firestore_client.collection("assets").document(asset_id).set(data)
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to write metadata to Firestore: {e}",
-        )
+        raise HTTPException(500, f"Failed to write metadata to Firestore: {e}")
 
 
 # -------------------------------------------------------------------
-# Enrichment endpoint
+# Enrich endpoint
 # -------------------------------------------------------------------
 @app.post("/enrich")
 async def enrich(req: Request):
@@ -486,42 +410,32 @@ async def enrich(req: Request):
     asset_id = asset_json.get("asset_id")
     media_type = asset_json.get("media_type", "image")
 
+    print("MEDIA_TYPE:", media_type)
+
     if not asset_id:
         raise HTTPException(400, "asset_id is required")
 
-    # 1. Direct upload
+    # Load media
     if "media_bytes" in asset_json:
-        try:
-            media_bytes = base64.b64decode(asset_json["media_bytes"])
-        except Exception:
-            raise HTTPException(400, "Invalid base64 media_bytes")
-
-    # 2. GCS mode
+        media_bytes = base64.b64decode(asset_json["media_bytes"])
     elif "bucket" in asset_json and "file_name" in asset_json:
         media_bytes = load_from_gcs(asset_json["bucket"], asset_json["file_name"])
-
     else:
-        raise HTTPException(
-            400,
-            "Invalid input: provide media_bytes OR bucket+file_name"
-        )
+        raise HTTPException(400, "Provide media_bytes OR bucket+file_name")
 
     # ---------------------------------------------------------
-    # Video handling: size-based decision
+    # VIDEO LOGIC
     # ---------------------------------------------------------
     if media_type == "video":
         original_size = len(media_bytes)
         print("ORIGINAL VIDEO SIZE:", original_size)
 
         if original_size > MAX_VIDEO_BYTES:
-            # Too large → use frame sampling at 5 FPS
             print("VIDEO TOO LARGE → USING FRAME SAMPLING (5 FPS)")
             frames = extract_frames(media_bytes, fps=5)
             print("EXTRACTED FRAMES:", len(frames))
 
             prompt = build_prompt(asset_json, media_type)
-
-            # Diagnostics
             print("PROMPT SIZE:", len(prompt))
             print("METADATA SIZE:", len(json.dumps(asset_json)))
 
@@ -537,13 +451,12 @@ async def enrich(req: Request):
             return asset_json
 
         else:
-            # Small enough → downscale to 720p and send video
             print("VIDEO SMALL ENOUGH → DOWNSCALING")
             media_bytes = downscale_video(media_bytes, resolution="720")
             print("DOWNSCALED VIDEO SIZE:", len(media_bytes))
 
     # ---------------------------------------------------------
-    # Build prompt + run Gemini (image or downscaled video)
+    # IMAGE or DOWNSCALED VIDEO
     # ---------------------------------------------------------
     prompt = build_prompt(asset_json, media_type)
 
