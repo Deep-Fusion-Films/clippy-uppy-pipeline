@@ -279,3 +279,4 @@ async def transcribe(req: Request):
     except Exception as e:
         logger.exception(f"UNEXPECTED ERROR for request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+        
