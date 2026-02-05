@@ -1,6 +1,8 @@
 import os
 import json
 import base64
+import subprocess
+import tempfile
 from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
@@ -42,6 +44,47 @@ def warmup():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Warmup failed: {e}")
+
+
+# -------------------------------------------------------------------
+# Downscale video using FFmpeg
+# -------------------------------------------------------------------
+def downscale_video(media_bytes: bytes, resolution: str = "720") -> bytes:
+    try:
+        # Write original video to temp file
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as input_file:
+            input_file.write(media_bytes)
+            input_path = input_file.name
+
+        # Prepare output file
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as output_file:
+            output_path = output_file.name
+
+        scale_filter = f"scale=-2:{resolution}"
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", input_path,
+            "-vf", scale_filter,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "28",
+            "-c:a", "aac",
+            output_path,
+        ]
+
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+        # Read downscaled video
+        with open(output_path, "rb") as f:
+            return f.read()
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Video downscaling failed: {e}",
+        )
 
 
 # -------------------------------------------------------------------
@@ -362,18 +405,14 @@ async def enrich(req: Request):
     if not asset_id:
         raise HTTPException(400, "asset_id is required")
 
-    # ---------------------------------------------------------
-    # 1. Getty or direct upload (media_bytes)
-    # ---------------------------------------------------------
+    # 1. Direct upload
     if "media_bytes" in asset_json:
         try:
             media_bytes = base64.b64decode(asset_json["media_bytes"])
         except Exception:
             raise HTTPException(400, "Invalid base64 media_bytes")
 
-    # ---------------------------------------------------------
-    # 2. GCS mode (existing)
-    # ---------------------------------------------------------
+    # 2. GCS mode
     elif "bucket" in asset_json and "file_name" in asset_json:
         media_bytes = load_from_gcs(asset_json["bucket"], asset_json["file_name"])
 
@@ -384,23 +423,23 @@ async def enrich(req: Request):
         )
 
     # ---------------------------------------------------------
-    # Build prompt
+    # Downscale video BEFORE calling Gemini
+    # ---------------------------------------------------------
+    if media_type == "video":
+        print("ORIGINAL VIDEO SIZE:", len(media_bytes))
+        media_bytes = downscale_video(media_bytes, resolution="720")
+        print("DOWNSCALED VIDEO SIZE:", len(media_bytes))
+
+    # ---------------------------------------------------------
+    # Build prompt + run Gemini
     # ---------------------------------------------------------
     prompt = build_prompt(asset_json, media_type)
 
-    # ---------------------------------------------------------
-    # DIAGNOSTIC LOGGING (added)
-    # ---------------------------------------------------------
-    try:
-        print("MEDIA BYTES:", len(media_bytes))
-        print("PROMPT SIZE:", len(prompt))
-        print("METADATA SIZE:", len(json.dumps(asset_json)))
-    except Exception as e:
-        print("LOGGING ERROR:", e)
+    # Diagnostic logging
+    print("MEDIA BYTES:", len(media_bytes))
+    print("PROMPT SIZE:", len(prompt))
+    print("METADATA SIZE:", len(json.dumps(asset_json)))
 
-    # ---------------------------------------------------------
-    # Run Gemini
-    # ---------------------------------------------------------
     enriched = run_gemini(prompt, media_bytes, media_type)
 
     # ---------------------------------------------------------
