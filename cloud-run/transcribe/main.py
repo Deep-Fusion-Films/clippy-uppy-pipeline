@@ -9,7 +9,6 @@ from google.cloud import storage
 import whisper
 
 app = FastAPI()
-
 logger = logging.getLogger("uvicorn.error")
 
 # --------------------------------------------------------------------
@@ -49,8 +48,31 @@ def normalize_bucket(bucket_uri: str) -> str:
     return bucket_uri
 
 
+def split_gs_uri(gs_uri: str):
+    if not gs_uri.startswith("gs://"):
+        raise ValueError(f"Invalid GCS URI: {gs_uri}")
+    without = gs_uri[len("gs://"):]
+    bucket, _, blob = without.partition("/")
+    return bucket, blob
+
+
 def download_from_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
     bucket_name = normalize_bucket(bucket_uri)
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+
+    logger.info(f"DOWNLOAD: gs://{bucket_name}/{blob_name} -> {local_path}")
+
+    if not blob.exists():
+        msg = f"GCS object not found: gs://{bucket_name}/{blob_name}"
+        logger.error(msg)
+        raise HTTPException(status_code=404, detail=msg)
+
+    blob.download_to_filename(local_path)
+    return local_path
+
+
+def download_from_gcs_bucket_name(bucket_name: str, blob_name: str, local_path: str):
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
 
@@ -71,8 +93,8 @@ def upload_to_gcs(bucket_uri: str, blob_name: str, local_path: str) -> str:
     blob = bucket.blob(blob_name)
 
     logger.info(f"UPLOAD: {local_path} -> gs://{bucket_name}/{blob_name}")
-
     blob.upload_from_filename(local_path)
+
     return f"gs://{bucket_name}/{blob_name}"
 
 
@@ -100,28 +122,15 @@ async def transcribe(req: Request):
         logger.info(f"REQUEST BODY: {data}")
 
         # ------------------------------------------------------------
-        # Mode 1: Getty
+        # Determine asset_id
         # ------------------------------------------------------------
-        if "asset_id" in data and "paths" in data and "transcoded" in data["paths"]:
+        if "asset_id" in data:
             asset_id = data["asset_id"]
-            transcoded_blob_name = f"transcoded/{asset_id}_normalized.mp4"
-            logger.info(f"MODE: Getty | asset_id={asset_id}")
-
-        # ------------------------------------------------------------
-        # Mode 2: Local GCS
-        # ------------------------------------------------------------
-        elif "file_name" in data and "bucket" in data:
-            file_name = data["file_name"]
-            bucket = data["bucket"]
-            asset_id = os.path.splitext(os.path.basename(file_name))[0]
-            transcoded_blob_name = f"transcoded/{asset_id}_normalized.mp4"
-            logger.info(
-                f"MODE: Local | file_name={file_name} bucket={bucket} asset_id={asset_id}"
-            )
-
+        elif "file_name" in data:
+            asset_id = os.path.splitext(os.path.basename(data["file_name"]))[0]
         else:
-            msg = "Provide either asset_id+paths.transcoded OR file_name+bucket."
-            logger.error(f"BAD REQUEST: {msg} | data={data}")
+            msg = "Missing asset_id or file_name."
+            logger.error(msg)
             raise HTTPException(status_code=400, detail=msg)
 
         # Local temp paths
@@ -130,58 +139,106 @@ async def transcribe(req: Request):
         local_transcript = f"/tmp/{asset_id}.json"
 
         # ------------------------------------------------------------
-        # Download transcoded video
+        # 1) Prefer upstream audio if provided
         # ------------------------------------------------------------
-        logger.info("STEP: download_from_gcs")
-        download_from_gcs(TRANSCODED_BUCKET, transcoded_blob_name, local_video)
+        audio_source_local = None
+        paths = data.get("paths") or {}
+        transcoded = paths.get("transcoded")
 
-        # ------------------------------------------------------------
-        # Extract audio with ffmpeg
-        # ------------------------------------------------------------
-        logger.info("STEP: ffmpeg extract audio")
-        try:
-            ffmpeg_proc = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    local_video,
-                    "-vn",
-                    "-acodec",
-                    "pcm_s16le",
-                    "-ar",
-                    "16000",
-                    "-ac",
-                    "1",
-                    local_audio,
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if ffmpeg_proc.returncode != 0:
-                msg = (
-                    f"FFmpeg failed with code {ffmpeg_proc.returncode}: "
-                    f"{ffmpeg_proc.stderr}"
+        if isinstance(transcoded, dict) and "audio" in transcoded:
+            audio_uri = transcoded["audio"]
+            logger.info(f"MODE: using provided audio file {audio_uri}")
+
+            bucket_name, blob_name = split_gs_uri(audio_uri)
+            audio_source_local = f"/tmp/{asset_id}_source_audio"
+            download_from_gcs_bucket_name(bucket_name, blob_name, audio_source_local)
+
+        else:
+            # ------------------------------------------------------------
+            # 2) Fall back to extracting audio from video
+            # ------------------------------------------------------------
+            logger.info("MODE: extracting audio from video")
+
+            transcoded_blob_name = f"transcoded/{asset_id}_normalized.mp4"
+            download_from_gcs(TRANSCODED_BUCKET, transcoded_blob_name, local_video)
+
+            logger.info("STEP: ffmpeg extract audio")
+            try:
+                ffmpeg_proc = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i", local_video,
+                        "-vn",
+                        "-acodec", "pcm_s16le",
+                        "-ar", "16000",
+                        "-ac", "1",
+                        local_audio,
+                    ],
+                    capture_output=True,
+                    text=True,
                 )
+
+                if ffmpeg_proc.returncode == 0:
+                    audio_source_local = local_audio
+                else:
+                    # No audio stream → treat as silent
+                    logger.warning(
+                        f"No audio stream detected for asset {asset_id}. "
+                        f"FFmpeg stderr: {ffmpeg_proc.stderr}"
+                    )
+                    audio_source_local = None
+
+            except FileNotFoundError:
+                msg = "ffmpeg binary not found in container."
                 logger.error(msg)
                 raise HTTPException(status_code=500, detail=msg)
-        except FileNotFoundError:
-            msg = "ffmpeg binary not found in container."
-            logger.error(msg)
-            raise HTTPException(status_code=500, detail=msg)
 
         # ------------------------------------------------------------
-        # Upload audio
+        # Handle silent videos
         # ------------------------------------------------------------
-        logger.info("STEP: upload audio")
-        audio_blob_name = f"audio/{asset_id}.wav"
-        gcs_audio = upload_to_gcs(AUDIO_BUCKET, audio_blob_name, local_audio)
+        if audio_source_local is None:
+            logger.info(f"ASSET {asset_id} HAS NO AUDIO — returning empty transcript")
+
+            transcript_json = {
+                "text": "",
+                "language": "en",
+                "segments": [],
+                "confidence": None,
+                "note": "No audio detected in source video",
+            }
+
+            with open(local_transcript, "w") as f:
+                json.dump(transcript_json, f, indent=2)
+
+            transcript_blob_name = f"transcripts/{asset_id}.json"
+            gcs_transcript = upload_to_gcs(
+                TRANSCRIPTS_BUCKET, transcript_blob_name, local_transcript
+            )
+
+            return {
+                "asset_id": asset_id,
+                "paths": {
+                    "audio": None,
+                    "transcript": gcs_transcript,
+                },
+                "transcript": transcript_json,
+                "status": "no_audio",
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+
+        # ------------------------------------------------------------
+        # Upload audio (wav or mp3)
+        # ------------------------------------------------------------
+        ext = os.path.splitext(audio_source_local)[1]
+        audio_blob_name = f"audio/{asset_id}{ext}"
+        gcs_audio = upload_to_gcs(AUDIO_BUCKET, audio_blob_name, audio_source_local)
 
         # ------------------------------------------------------------
         # Whisper transcription
         # ------------------------------------------------------------
         logger.info("STEP: whisper transcribe")
-        result = model.transcribe(local_audio)
+        result = model.transcribe(audio_source_local)
 
         transcript_json = {
             "text": result.get("text", ""),
@@ -198,7 +255,6 @@ async def transcribe(req: Request):
             json.dump(transcript_json, f, indent=2)
 
         transcript_blob_name = f"transcripts/{asset_id}.json"
-        logger.info("STEP: upload transcript JSON")
         gcs_transcript = upload_to_gcs(
             TRANSCRIPTS_BUCKET, transcript_blob_name, local_transcript
         )
@@ -219,7 +275,6 @@ async def transcribe(req: Request):
         }
 
     except HTTPException:
-        # Already logged with detail above
         raise
     except Exception as e:
         logger.exception(f"UNEXPECTED ERROR for request: {e}")
