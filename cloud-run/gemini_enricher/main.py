@@ -29,6 +29,9 @@ firestore_client = firestore.Client()
 # Bucket where enriched metadata JSON will be stored
 METADATA_BUCKET = os.getenv("METADATA_BUCKET", "df-films-metadata-euw1")
 
+# Max inline video size before switching to frame sampling (20 MB)
+MAX_VIDEO_BYTES = 20 * 1024 * 1024
+
 
 # -------------------------------------------------------------------
 # Warm‑up endpoint
@@ -51,12 +54,10 @@ def warmup():
 # -------------------------------------------------------------------
 def downscale_video(media_bytes: bytes, resolution: str = "480") -> bytes:
     try:
-        # Write original video to temp file
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as input_file:
             input_file.write(media_bytes)
             input_path = input_file.name
 
-        # Prepare output file
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as output_file:
             output_path = output_file.name
 
@@ -76,7 +77,6 @@ def downscale_video(media_bytes: bytes, resolution: str = "480") -> bytes:
 
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
-        # Read downscaled video
         with open(output_path, "rb") as f:
             return f.read()
 
@@ -84,6 +84,52 @@ def downscale_video(media_bytes: bytes, resolution: str = "480") -> bytes:
         raise HTTPException(
             status_code=500,
             detail=f"Video downscaling failed: {e}",
+        )
+
+
+# -------------------------------------------------------------------
+# Extract frames at fixed FPS using FFmpeg
+# -------------------------------------------------------------------
+def extract_frames(media_bytes: bytes, fps: int = 5) -> list[bytes]:
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as input_file:
+            input_file.write(media_bytes)
+            input_path = input_file.name
+
+        output_dir = tempfile.mkdtemp()
+        output_pattern = os.path.join(output_dir, "frame_%04d.jpg")
+
+        cmd = [
+            "ffmpeg",
+            "-i", input_path,
+            "-vf", f"fps={fps}",
+            output_pattern,
+            "-hide_banner",
+            "-loglevel", "error",
+        ]
+
+        subprocess.run(cmd, check=True)
+
+        frames: list[bytes] = []
+        for fname in sorted(os.listdir(output_dir)):
+            if fname.endswith(".jpg"):
+                with open(os.path.join(output_dir, fname), "rb") as f:
+                    frames.append(f.read())
+
+        if not frames:
+            raise HTTPException(
+                status_code=500,
+                detail="Frame extraction produced no frames.",
+            )
+
+        return frames
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Frame extraction failed: {e}",
         )
 
 
@@ -144,7 +190,7 @@ def strip_leading_json_token(text: str) -> str:
 
 
 # -------------------------------------------------------------------
-# Optimized Schema Block
+# Optimized Schema Block (unchanged)
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """
 {
@@ -230,7 +276,7 @@ SCHEMA_BLOCK = """
 
 
 # -------------------------------------------------------------------
-# Prompt builder
+# Prompt builder (unchanged)
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict, media_type: str) -> str:
     media_line = (
@@ -320,7 +366,7 @@ def extract_text(response) -> str:
 
 
 # -------------------------------------------------------------------
-# Gemini inference
+# Gemini inference (single media: image or video)
 # -------------------------------------------------------------------
 def run_gemini(prompt: str, media_bytes: bytes, media_type: str) -> dict:
     try:
@@ -345,6 +391,44 @@ def run_gemini(prompt: str, media_bytes: bytes, media_type: str) -> dict:
         raise HTTPException(
             status_code=500,
             detail=f"Error calling Gemini model: {e}",
+        )
+
+    text = extract_text(response)
+    text = strip_markdown_fences(text)
+    text = strip_leading_json_token(text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Model returned invalid JSON: {text}",
+        )
+
+
+# -------------------------------------------------------------------
+# Gemini inference (multi-image: sampled frames)
+# -------------------------------------------------------------------
+def run_gemini_multi(prompt: str, frames: list[bytes]) -> dict:
+    try:
+        contents = [{"text": prompt}]
+        for frame in frames:
+            contents.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": frame,
+                }
+            })
+
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error calling Gemini model (multi): {e}",
         )
 
     text = extract_text(response)
@@ -423,28 +507,52 @@ async def enrich(req: Request):
         )
 
     # ---------------------------------------------------------
-    # Downscale video BEFORE calling Gemini
+    # Video handling: size-based decision
     # ---------------------------------------------------------
     if media_type == "video":
-        print("ORIGINAL VIDEO SIZE:", len(media_bytes))
-        media_bytes = downscale_video(media_bytes, resolution="720")
-        print("DOWNSCALED VIDEO SIZE:", len(media_bytes))
+        original_size = len(media_bytes)
+        print("ORIGINAL VIDEO SIZE:", original_size)
+
+        if original_size > MAX_VIDEO_BYTES:
+            # Too large → use frame sampling at 5 FPS
+            print("VIDEO TOO LARGE → USING FRAME SAMPLING (5 FPS)")
+            frames = extract_frames(media_bytes, fps=5)
+            print("EXTRACTED FRAMES:", len(frames))
+
+            prompt = build_prompt(asset_json, media_type)
+
+            # Diagnostics
+            print("PROMPT SIZE:", len(prompt))
+            print("METADATA SIZE:", len(json.dumps(asset_json)))
+
+            enriched = run_gemini_multi(prompt, frames)
+
+            asset_json["analysis"] = enriched
+            asset_json["status"] = "enriched"
+            asset_json["timestamp"] = datetime.utcnow().isoformat() + "Z"
+
+            write_metadata_to_gcs(asset_id, asset_json)
+            write_metadata_to_firestore(asset_id, asset_json)
+
+            return asset_json
+
+        else:
+            # Small enough → downscale to 720p and send video
+            print("VIDEO SMALL ENOUGH → DOWNSCALING")
+            media_bytes = downscale_video(media_bytes, resolution="720")
+            print("DOWNSCALED VIDEO SIZE:", len(media_bytes))
 
     # ---------------------------------------------------------
-    # Build prompt + run Gemini
+    # Build prompt + run Gemini (image or downscaled video)
     # ---------------------------------------------------------
     prompt = build_prompt(asset_json, media_type)
 
-    # Diagnostic logging
     print("MEDIA BYTES:", len(media_bytes))
     print("PROMPT SIZE:", len(prompt))
     print("METADATA SIZE:", len(json.dumps(asset_json)))
 
     enriched = run_gemini(prompt, media_bytes, media_type)
 
-    # ---------------------------------------------------------
-    # Merge + store metadata
-    # ---------------------------------------------------------
     asset_json["analysis"] = enriched
     asset_json["status"] = "enriched"
     asset_json["timestamp"] = datetime.utcnow().isoformat() + "Z"
