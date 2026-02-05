@@ -2,8 +2,8 @@ import os
 import random
 import json
 from google.cloud import storage
-import google.auth
 import google.auth.transport.requests
+from google.oauth2 import id_token
 import requests
 
 BUCKET = os.getenv("BUCKET", "df-films-assets-euw1")
@@ -36,10 +36,12 @@ def list_gcs_files():
 
 
 def get_identity_token(audience):
-    creds, _ = google.auth.default()
-    auth_req = google.auth.transport.requests.Request()
-    creds.refresh(auth_req)
-    return creds.id_token
+    """
+    Correct Cloud Run → Cloud Run authentication.
+    Uses fetch_id_token, which works with Compute Engine / Cloud Run credentials.
+    """
+    request = google.auth.transport.requests.Request()
+    return id_token.fetch_id_token(request, audience)
 
 
 def run_pipeline(file_name):
