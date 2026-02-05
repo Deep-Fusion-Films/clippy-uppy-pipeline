@@ -362,14 +362,18 @@ async def enrich(req: Request):
     if not asset_id:
         raise HTTPException(400, "asset_id is required")
 
-    # 1. Direct upload
+    # ---------------------------------------------------------
+    # 1. Getty or direct upload (media_bytes)
+    # ---------------------------------------------------------
     if "media_bytes" in asset_json:
         try:
             media_bytes = base64.b64decode(asset_json["media_bytes"])
         except Exception:
             raise HTTPException(400, "Invalid base64 media_bytes")
 
-    # 2. GCS mode
+    # ---------------------------------------------------------
+    # 2. GCS mode (existing)
+    # ---------------------------------------------------------
     elif "bucket" in asset_json and "file_name" in asset_json:
         media_bytes = load_from_gcs(asset_json["bucket"], asset_json["file_name"])
 
@@ -379,11 +383,29 @@ async def enrich(req: Request):
             "Invalid input: provide media_bytes OR bucket+file_name"
         )
 
-    # Build prompt + run Gemini
+    # ---------------------------------------------------------
+    # Build prompt
+    # ---------------------------------------------------------
     prompt = build_prompt(asset_json, media_type)
+
+    # ---------------------------------------------------------
+    # DIAGNOSTIC LOGGING (added)
+    # ---------------------------------------------------------
+    try:
+        print("MEDIA BYTES:", len(media_bytes))
+        print("PROMPT SIZE:", len(prompt))
+        print("METADATA SIZE:", len(json.dumps(asset_json)))
+    except Exception as e:
+        print("LOGGING ERROR:", e)
+
+    # ---------------------------------------------------------
+    # Run Gemini
+    # ---------------------------------------------------------
     enriched = run_gemini(prompt, media_bytes, media_type)
 
+    # ---------------------------------------------------------
     # Merge + store metadata
+    # ---------------------------------------------------------
     asset_json["analysis"] = enriched
     asset_json["status"] = "enriched"
     asset_json["timestamp"] = datetime.utcnow().isoformat() + "Z"
