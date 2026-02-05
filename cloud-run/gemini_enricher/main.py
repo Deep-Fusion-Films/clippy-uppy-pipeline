@@ -125,7 +125,7 @@ SCHEMA_BLOCK = """
       {
         "name": string|null,
         "sublocation": string|null,
-        "indoor_outdoor": "indoor" | "outdoor" | null
+        "indoor_outdoor": "indoor"|"outdoor"|null
       }
     ],
     "orgs": [
@@ -148,7 +148,7 @@ SCHEMA_BLOCK = """
   "activities": [
     { "label": string, "confidence": number, "who": string|null }
   ],
-  "themes": [ string ],
+  "themes": [string],
   "composition": {
     "camera_angle": string|null,
     "focal_length_est": string|null,
@@ -158,11 +158,9 @@ SCHEMA_BLOCK = """
     "contrast_style": string|null,
     "orientation": string|null
   },
-  "text_in_image": [ string ],
-  "distinguishing_features": [ string ],
-  "story_use": [
-    "opener" | "bridge" | "chapter_art" | "context" | "climax" | "reveal"
-  ],
+  "text_in_image": [string],
+  "distinguishing_features": [string],
+  "story_use": ["opener"|"bridge"|"chapter_art"|"context"|"climax"|"reveal"],
   "safety": {
     "sensitive": boolean,
     "notes": string|null
@@ -175,7 +173,7 @@ SCHEMA_BLOCK = """
     "lighting_context": string|null,
     "metadata_date": string|null,
     "visual_date_estimate": string|null,
-    "alignment": "match" | "partial_match" | "contradiction",
+    "alignment": "match"|"partial_match"|"contradiction",
     "notes": string|null
   },
   "timeline": [
