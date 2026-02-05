@@ -409,20 +409,20 @@ async def enrich(req: Request):
 
     asset_id = asset_json.get("asset_id")
 
-# Prefer explicit media_type, but fall back to asset_type
-media_type = asset_json.get("media_type")
-asset_type = asset_json.get("asset_type")
+    # Prefer explicit media_type, but fall back to asset_type
+    media_type = asset_json.get("media_type")
+    asset_type = asset_json.get("asset_type")
 
-if not media_type:
-    if asset_type == "video":
-        media_type = "video"
-    elif asset_type == "image":
-        media_type = "image"
-    else:
-        media_type = "image"
+    if not media_type:
+        if asset_type == "video":
+            media_type = "video"
+        elif asset_type == "image":
+            media_type = "image"
+        else:
+            media_type = "image"
 
-print("MEDIA_TYPE:", media_type)
-print("ASSET_TYPE:", asset_type)
+    print("MEDIA_TYPE:", media_type)
+    print("ASSET_TYPE:", asset_type)
 
     if not asset_id:
         raise HTTPException(400, "asset_id is required")
