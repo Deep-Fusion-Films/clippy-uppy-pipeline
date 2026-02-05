@@ -179,12 +179,12 @@ steps:
   args:
     [
       "run", "jobs", "deploy", "batch-runner",
-      "--image ${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/batch-runner:latest",
-      "--region", "europe-west1",
-      "--set-env-vars", "BUCKET=df-films-assets-euw1",
-      "--set-env-vars", "FOLDER=newsflare/newsflare_upload/",
-      "--set-env-vars", "START_PIPELINE_URL=https://start-pipeline-863025961248.europe-west1.run.app/run_all",
-      "--set-env-vars", "COUNT=20"
+      "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/clippyuppy/batch-runner:latest",
+      "--region=europe-west1",
+      "--set-env-vars=BUCKET=df-films-assets-euw1",
+      "--set-env-vars=FOLDER=newsflare/newsflare_upload/",
+      "--set-env-vars=START_PIPELINE_URL=https://start-pipeline-863025961248.europe-west1.run.app/run_all",
+      "--set-env-vars=COUNT=100"
     ]
 
 images:
