@@ -29,16 +29,12 @@ METADATA_BUCKET = os.getenv("METADATA_BUCKET", "df-films-metadata-euw1")
 
 
 # -------------------------------------------------------------------
-# Warm‑up endpoint (added)
+# Warm‑up endpoint
 # -------------------------------------------------------------------
 @app.get("/warmup")
 def warmup():
-    """
-    Lightweight warm-up endpoint to ensure the service is fully initialized.
-    Useful for Cloud Run min instances or external warmers.
-    """
     try:
-        _ = client is not None  # touch the client to ensure initialization
+        _ = client is not None
         return {
             "status": "warm",
             "message": "Gemini-enricher is ready",
@@ -105,7 +101,7 @@ def strip_leading_json_token(text: str) -> str:
 
 
 # -------------------------------------------------------------------
-# CLEANED SCHEMA BLOCK (unchanged)
+# Optimized Schema Block
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """
 {
@@ -191,7 +187,7 @@ SCHEMA_BLOCK = """
 
 
 # -------------------------------------------------------------------
-# Prompt builder (unchanged)
+# Prompt builder
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict, media_type: str) -> str:
     media_line = (
@@ -281,7 +277,7 @@ def extract_text(response) -> str:
 
 
 # -------------------------------------------------------------------
-# Gemini inference (unchanged)
+# Gemini inference
 # -------------------------------------------------------------------
 def run_gemini(prompt: str, media_bytes: bytes, media_type: str) -> dict:
     try:
@@ -354,7 +350,7 @@ def write_metadata_to_firestore(asset_id: str, data: dict):
 
 
 # -------------------------------------------------------------------
-# Enrichment endpoint (unchanged)
+# Enrichment endpoint
 # -------------------------------------------------------------------
 @app.post("/enrich")
 async def enrich(req: Request):
@@ -366,18 +362,14 @@ async def enrich(req: Request):
     if not asset_id:
         raise HTTPException(400, "asset_id is required")
 
-    # ---------------------------------------------------------
-    # 1. Getty or direct upload (media_bytes)
-    # ---------------------------------------------------------
+    # 1. Direct upload
     if "media_bytes" in asset_json:
         try:
             media_bytes = base64.b64decode(asset_json["media_bytes"])
         except Exception:
             raise HTTPException(400, "Invalid base64 media_bytes")
 
-    # ---------------------------------------------------------
-    # 2. GCS mode (existing)
-    # ---------------------------------------------------------
+    # 2. GCS mode
     elif "bucket" in asset_json and "file_name" in asset_json:
         media_bytes = load_from_gcs(asset_json["bucket"], asset_json["file_name"])
 
@@ -387,15 +379,11 @@ async def enrich(req: Request):
             "Invalid input: provide media_bytes OR bucket+file_name"
         )
 
-    # ---------------------------------------------------------
     # Build prompt + run Gemini
-    # ---------------------------------------------------------
     prompt = build_prompt(asset_json, media_type)
     enriched = run_gemini(prompt, media_bytes, media_type)
 
-    # ---------------------------------------------------------
     # Merge + store metadata
-    # ---------------------------------------------------------
     asset_json["analysis"] = enriched
     asset_json["status"] = "enriched"
     asset_json["timestamp"] = datetime.utcnow().isoformat() + "Z"
