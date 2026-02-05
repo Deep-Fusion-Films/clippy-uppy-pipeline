@@ -1,8 +1,10 @@
 import os
 import random
 import json
-import subprocess
 from google.cloud import storage
+import google.auth
+import google.auth.transport.requests
+import requests
 
 BUCKET = os.getenv("BUCKET", "df-films-assets-euw1")
 FOLDER = os.getenv("FOLDER", "newsflare/newsflare_upload")
@@ -33,6 +35,13 @@ def list_gcs_files():
     return [blob.name for blob in blobs if blob.name.endswith(".mp4")]
 
 
+def get_identity_token(audience):
+    creds, _ = google.auth.default()
+    auth_req = google.auth.transport.requests.Request()
+    creds.refresh(auth_req)
+    return creds.id_token
+
+
 def run_pipeline(file_name):
     payload = {
         "file_name": file_name,
@@ -40,18 +49,27 @@ def run_pipeline(file_name):
         "source": "newsflare"
     }
 
-    token = subprocess.getoutput("gcloud auth print-identity-token")
+    token = get_identity_token(START_PIPELINE_URL)
 
-    cmd = [
-        "curl", "-X", "POST", START_PIPELINE_URL,
-        "-H", f"Authorization: Bearer {token}",
-        "-H", "Content-Type: application/json",
-        "-d", json.dumps(payload)
-    ]
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
 
     print(f"Processing: {file_name}")
-    result = subprocess.getoutput(" ".join(cmd))
-    print(result)
+
+    try:
+        response = requests.post(
+            START_PIPELINE_URL,
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        print(f"Status: {response.status_code}")
+        print(response.text)
+    except Exception as e:
+        print(f"Error calling pipeline: {e}")
+
     print("-" * 40)
 
 
