@@ -49,7 +49,7 @@ def warmup():
 # -------------------------------------------------------------------
 # Downscale video using FFmpeg
 # -------------------------------------------------------------------
-def downscale_video(media_bytes: bytes, resolution: str = "720") -> bytes:
+def downscale_video(media_bytes: bytes, resolution: str = "480") -> bytes:
     try:
         # Write original video to temp file
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as input_file:
