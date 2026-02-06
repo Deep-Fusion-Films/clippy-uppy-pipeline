@@ -27,9 +27,8 @@ firestore_client = firestore.Client()
 
 METADATA_BUCKET = os.getenv("METADATA_BUCKET", "df-films-metadata-euw1")
 
-# Thresholds
+# Threshold: above this, we use frame sampling
 MAX_VIDEO_BYTES = 20 * 1024 * 1024  # 20 MB
-MAX_FRAMES = 150  # Hard cap to prevent OOM
 
 
 # -------------------------------------------------------------------
@@ -159,7 +158,7 @@ def strip_leading_json_token(text: str) -> str:
 
 
 # -------------------------------------------------------------------
-# NEW DEEP HYBRID SCHEMA BLOCK
+# Schema (upgraded with explicit AI‑artifact fields)
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """{
   "brief_summary": "string",
@@ -269,6 +268,19 @@ SCHEMA_BLOCK = """{
     }
   ],
 
+  "recognizable": {
+    "people": ["string"],
+    "places": ["string"],
+    "events": ["string"]
+  },
+
+  "historical_context": {
+    "period": "string | null",
+    "evidence": ["string"]
+  },
+
+  "tags": ["string"],
+
   "ai_artifacts": {
     "vis": "boolean",
     "aud": "boolean",
@@ -280,39 +292,71 @@ SCHEMA_BLOCK = """{
 
 
 # -------------------------------------------------------------------
-# NEW DEEP HYBRID PROMPT BUILDER TEMPLATE
+# Prompt builder (updated with new instructions)
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict, media_type: str) -> str:
     media_line = (
-        "You are given a REAL video."
+        "You are analyzing a REAL video clip for a stock media library."
         if media_type == "video"
-        else "You are given a REAL image."
+        else "You are analyzing a REAL image for a stock media library."
     )
 
     template = f"""
 You are a constrained forensic video-analysis system. Your output must be strictly factual, concise, and fully aligned with the schema provided. Do not speculate, infer intent, or add information not directly observable in the media.
 
+{media_line} You may be shown multiple frames extracted at equally spaced intervals throughout the video. These frames reveal the action, movement, and changes that occur over time. Your task is to extract maximum factual detail to help users find this video when searching for specific content.
+
 STRICT RULES:
 1. If uncertain, return null, false, or empty arrays.
-2. Never guess identities, brands, demographics, or AI-generation indicators.
-3. Describe only what is visually or audibly present; no hidden motives or stories.
-4. Be specific, concrete, and observational.
+2. Never guess identities, brands, demographics, locations, or AI-generation indicators.
+3. Describe only what is visually or audibly present; no hidden motives or invented narrative.
+4. Be specific, concrete, and observational. Identify species, object types, clothing, colors, lighting, and visible behaviours.
 5. Follow the schema exactly. Do not add or remove fields.
 6. Use consistent terminology across all fields.
-7. Only report people, animals, objects, brands, or text that are clearly visible. Be specific as to species, brands, names (celebrities). Include all relevant information
+7. Only report people, animals, objects, brands, or text that are clearly visible. Include all relevant observable details.
 8. Timeline entries must be concrete, observable events tied to approximate timestamps.
 9. Audio descriptions must reflect actual audible content (speech, events, noise, mood if clearly signalled).
 10. Camera analysis must reflect observable motion, framing, shake, exposure, and focus behaviour.
 11. Environment analysis must reflect visible lighting, surfaces, depth, and location type.
 12. Human and animal behaviour must be strictly based on visible actions and interactions.
-13. AI-artifact detection must only be reported when clear visual or audio evidence exists.
+
+AI-ARTIFACT DETECTION RULES:
+Check for the following visual indicators of AI generation:
+- Anatomical distortions (hands, limbs, faces, eyes, teeth)
+- Texture repetition or unnatural patterns
+- Inconsistent lighting or shadows
+- Physically impossible reflections or highlights
+- Warped geometry, bending objects, or melting edges
+- Temporal inconsistencies between frames (objects changing shape, position, or texture without cause)
+- Incorrect motion blur or missing motion blur
+- Overly smooth surfaces or plastic-like skin
+- Flickering details or unstable fine textures
+- Mismatched depth of field or inconsistent focus planes
+
+Check for the following audio indicators of AI generation:
+- Robotic or metallic voice timbre
+- Unnatural prosody, pacing, or breath patterns
+- Abrupt cutoffs or unnatural transitions
+- Repetitive or looping background noise
+- Phasey, warbling, or “underwater” artifacts
+- Inconsistent room acoustics or mismatched reverb
+- Audio that does not match visible actions or timing
+
+Only report AI artifacts when they are clearly visible or audible.
+
+ADDITIONAL DETAIL REQUIREMENTS:
+- Describe progression, changes, continuity, and evolving action across frames.
+- Identify changes in composition, lighting, subject position, and camera behaviour.
+- Identify recognizable people, places, or events only if visually confirmed.
+- If historical context is visually evident (clothing, technology, architecture), include it; otherwise return null.
+- Extract all relevant visual and audible cues that would help a user search for this video in a stock library.
 
 DEFINITIONS:
 - “Brief Summary”: 1–2 sentences describing the core content.
-- “Verbose Summary”:Sentences describing the sequence and context.
-- “Movement Type”: The type of movement made by the camera e.g steady, handheld, shaky, static, tracking, panning.
+- “Verbose Summary”: A detailed description of the sequence, context, and progression.
+- “Movement Type”: steady, handheld, shaky, static, tracking, panning.
 - “Timeline ts”: approximate time markers like 00:00, 00:05, 00:10.
-- “Audio Events”: Identify specific audio events e.g. footsteps, traffic, wind, speech, animal noises etc.
+- “Audio Events”: footsteps, traffic, wind, speech, animal noises.
 - “Scene Change”: a clear shift in camera angle, location, or composition.
 
 Return only valid JSON that conforms to the schema.
@@ -410,10 +454,7 @@ def run_gemini_multi(prompt: str, frames: list) -> dict:
 def write_metadata_to_gcs(asset_id: str, data: dict):
     try:
         blob = storage_client.bucket(METADATA_BUCKET).blob(f"{asset_id}.json")
-        blob.upload_from_string(
-            json.dumps(data, indent=2),
-            content_type="application/json",
-        )
+        blob.upload_from_string(json.dumps(data, indent=2), content_type="application/json")
     except Exception as e:
         raise HTTPException(500, f"Failed to write metadata to GCS: {e}")
 
@@ -433,8 +474,6 @@ async def enrich(req: Request):
     asset_json = await req.json()
 
     asset_id = asset_json.get("asset_id")
-    if not asset_id:
-        raise HTTPException(400, "asset_id is required")
 
     # Prefer explicit media_type, but fall back to asset_type
     media_type = asset_json.get("media_type")
@@ -451,12 +490,12 @@ async def enrich(req: Request):
     print("MEDIA_TYPE:", media_type)
     print("ASSET_TYPE:", asset_type)
 
+    if not asset_id:
+        raise HTTPException(400, "asset_id is required")
+
     # Load media
     if "media_bytes" in asset_json:
-        try:
-            media_bytes = base64.b64decode(asset_json["media_bytes"])
-        except Exception:
-            raise HTTPException(400, "Invalid base64 media_bytes")
+        media_bytes = base64.b64decode(asset_json["media_bytes"])
     elif "bucket" in asset_json and "file_name" in asset_json:
         media_bytes = load_from_gcs(asset_json["bucket"], asset_json["file_name"])
     else:
@@ -469,18 +508,10 @@ async def enrich(req: Request):
         original_size = len(media_bytes)
         print("ORIGINAL VIDEO SIZE:", original_size)
 
-        # If video is too large, sample frames at 5 FPS instead of sending full video
         if original_size > MAX_VIDEO_BYTES:
             print("VIDEO TOO LARGE → USING FRAME SAMPLING (5 FPS)")
             frames = extract_frames(media_bytes, fps=5)
-            print("EXTRACTED FRAMES (raw):", len(frames))
-
-            # Hard cap to prevent OOM
-            if len(frames) > MAX_FRAMES:
-                frames = frames[:MAX_FRAMES]
-                print(f"FRAMES TRIMMED TO CAP: {MAX_FRAMES}")
-            else:
-                print("FRAMES WITHIN CAP")
+            print("EXTRACTED FRAMES:", len(frames))
 
             prompt = build_prompt(asset_json, media_type)
             print("PROMPT SIZE:", len(prompt))
