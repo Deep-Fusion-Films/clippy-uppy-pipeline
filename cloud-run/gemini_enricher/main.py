@@ -159,7 +159,7 @@ def strip_leading_json_token(text: str) -> str:
 
 
 # -------------------------------------------------------------------
-# NEW SCHEMA BLOCK (REPLACED)
+# NEW DEEP HYBRID SCHEMA BLOCK
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """{
   "brief_summary": "string",
@@ -167,61 +167,120 @@ SCHEMA_BLOCK = """{
 
   "people": {
     "present": "boolean",
-    "count": "number | null"
+    "count": "number | null",
+    "details": [
+      {
+        "age": "string | null",
+        "gen": "string | null",
+        "role": "string | null",
+        "act": ["string"],
+        "pos": "string | null",
+        "clo": ["string"],
+        "vis": "string | null"
+      }
+    ]
   },
 
+  "animals": [
+    {
+      "type": "string",
+      "cnt": "number | null",
+      "beh": ["string"],
+      "col": "string | null",
+      "pos": "string | null",
+      "int": ["string"]
+    }
+  ],
+
+  "objects": [
+    {
+      "lbl": "string",
+      "cnt": "number | null",
+      "sal": "number | null",
+      "pos": "string | null",
+      "use": "string | null"
+    }
+  ],
+
   "brand_ip": {
-    "logos_detected": ["string"],
-    "other_branding": ["string"]
+    "logos": ["string"],
+    "other": ["string"],
+    "ctx": "string | null"
   },
 
   "celebrities": {
-    "detected": ["string"]
+    "detected": ["string"],
+    "ctx": "string | null"
   },
 
-  "movement": {
-    "type": "string | null"
+  "camera": {
+    "mov": "string | null",
+    "shake": "string | null",
+    "pan": "boolean | null",
+    "tilt": "boolean | null",
+    "zoom": "boolean | null",
+    "framing": "string | null",
+    "exp": "string | null",
+    "focus": "string | null",
+    "tempo": "string | null"
+  },
+
+  "environment": {
+    "tod": "string | null",
+    "loc": "string | null",
+    "lit": "string | null",
+    "wth": "string | null",
+    "surf": "string | null",
+    "bg": "string | null",
+    "depth": "string | null"
+  },
+
+  "audio": {
+    "speech": "string | null",
+    "lang": "string | null",
+    "events": ["string"],
+    "noise": ["string"],
+    "mood": "string | null"
   },
 
   "text_overlays": {
     "present": "boolean",
-    "texts": ["string"]
+    "texts": ["string"],
+    "pos": ["string"],
+    "lang": ["string"]
   },
 
   "quick_edits": {
     "present": "boolean",
-    "types": ["string"]
+    "types": ["string"],
+    "freq": "string | null"
   },
 
   "timeline": [
     {
-      "timestamp": "string",
-      "description": "string"
+      "ts": "string",
+      "desc": "string",
+      "hum": ["string"],
+      "ani": ["string"],
+      "objs": ["string"],
+      "cam": ["string"],
+      "aud": ["string"],
+      "scn_change": "boolean"
     }
   ],
 
-  "audio_transcript": "string | null",
-
-  "demographics": [
-    {
-      "age_range": "string | null",
-      "gender": "string | null",
-      "notes": "string | null"
-    }
-  ],
-
-  "objects": ["string"],
-
-  "ai_generated": {
-    "visual_ai_signs": "boolean",
-    "audio_ai_signs": "boolean",
+  "ai_artifacts": {
+    "vis": "boolean",
+    "aud": "boolean",
+    "vis_signs": ["string"],
+    "aud_signs": ["string"],
     "notes": "string"
   }
 }"""
 
 
 # -------------------------------------------------------------------
-# NEW PROMPT BUILDER TEMPLATE (REPLACED)
+# NEW DEEP HYBRID PROMPT BUILDER TEMPLATE
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict, media_type: str) -> str:
     media_line = (
@@ -231,27 +290,30 @@ def build_prompt(asset_json: dict, media_type: str) -> str:
     )
 
     template = f"""
-You are a constrained video-analysis system. Your output must be strictly factual, concise, and fully aligned with the schema provided. Do not speculate, infer intent, or add information not directly observable in the media.
+You are a constrained forensic video-analysis system. Your output must be strictly factual, concise, and fully aligned with the schema provided. Do not speculate, infer intent, or add information not directly observable in the media.
 
 STRICT RULES:
-1. If you are uncertain, return null, false, or an empty array.
-2. Never guess identities, brands, demographics, or AI‑generation indicators.
-3. All summaries must describe only what is visually or audibly present.
-4. Do not include opinions, interpretations, or narrative embellishment.
-5. Keep all text short, direct, and free of adjectives unless they describe observable properties.
-6. Follow the schema exactly. Do not add or remove fields.
-7. Use consistent terminology across all fields.
-8. When detecting people, brands, celebrities, objects, or text, only report items that are clearly visible.
-9. For timeline events, include only concrete, observable actions at approximate timestamps.
-10. For transcripts, provide a concise, approximate representation of audible speech without adding meaning.
+1. If uncertain, return null, false, or empty arrays.
+2. Never guess identities, brands, demographics, or AI-generation indicators.
+3. Describe only what is visually or audibly present; no hidden motives or stories.
+4. Keep all text short, direct, and observational.
+5. Follow the schema exactly. Do not add or remove fields.
+6. Use consistent terminology across all fields.
+7. Only report people, animals, objects, brands, or text that are clearly visible.
+8. Timeline entries must be concrete, observable events tied to approximate timestamps.
+9. Audio descriptions must reflect actual audible content (speech, events, noise, mood if clearly signalled).
+10. Camera analysis must reflect observable motion, framing, shake, exposure, and focus behaviour.
+11. Environment analysis must reflect visible lighting, surfaces, depth, and location type.
+12. Human and animal behaviour must be strictly based on visible actions and interactions.
+13. AI-artifact detection must only be reported when clear visual or audio evidence exists.
 
 DEFINITIONS:
 - “Brief Summary”: 1–2 sentences describing the core content.
 - “Verbose Summary”: 3–6 sentences describing the sequence and context.
-- “People Count”: number of distinct humans visible; return null if unclear.
 - “Movement Type”: steady, handheld, shaky, static, tracking, panning.
-- “Quick Edits”: jump cuts, fast transitions, rapid scene changes.
-- “AI‑Generated Detection”: only report if clear visual or audio artefacts strongly indicate synthetic origin.
+- “Timeline ts”: approximate time markers like 00:00, 00:05, 00:10.
+- “Audio Events”: meows, footsteps, traffic, wind, speech, etc.
+- “Scene Change”: a clear shift in camera angle, location, or composition.
 
 Return only valid JSON that conforms to the schema.
 
