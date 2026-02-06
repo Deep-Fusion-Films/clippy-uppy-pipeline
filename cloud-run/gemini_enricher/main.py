@@ -296,10 +296,10 @@ STRICT RULES:
 1. If uncertain, return null, false, or empty arrays.
 2. Never guess identities, brands, demographics, or AI-generation indicators.
 3. Describe only what is visually or audibly present; no hidden motives or stories.
-4. Keep all text short, direct, and observational.
+4. Be specific, concrete, and observational.
 5. Follow the schema exactly. Do not add or remove fields.
 6. Use consistent terminology across all fields.
-7. Only report people, animals, objects, brands, or text that are clearly visible.
+7. Only report people, animals, objects, brands, or text that are clearly visible. Be specific as to species, brands, names (celebrities). Include all relevant information
 8. Timeline entries must be concrete, observable events tied to approximate timestamps.
 9. Audio descriptions must reflect actual audible content (speech, events, noise, mood if clearly signalled).
 10. Camera analysis must reflect observable motion, framing, shake, exposure, and focus behaviour.
@@ -309,10 +309,10 @@ STRICT RULES:
 
 DEFINITIONS:
 - “Brief Summary”: 1–2 sentences describing the core content.
-- “Verbose Summary”: 3–6 sentences describing the sequence and context.
-- “Movement Type”: steady, handheld, shaky, static, tracking, panning.
+- “Verbose Summary”:Sentences describing the sequence and context.
+- “Movement Type”: The type of movement made by the camera e.g steady, handheld, shaky, static, tracking, panning.
 - “Timeline ts”: approximate time markers like 00:00, 00:05, 00:10.
-- “Audio Events”: meows, footsteps, traffic, wind, speech, etc.
+- “Audio Events”: Identify specific audio events e.g. footsteps, traffic, wind, speech, animal noises etc.
 - “Scene Change”: a clear shift in camera angle, location, or composition.
 
 Return only valid JSON that conforms to the schema.
