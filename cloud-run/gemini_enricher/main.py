@@ -27,8 +27,9 @@ firestore_client = firestore.Client()
 
 METADATA_BUCKET = os.getenv("METADATA_BUCKET", "df-films-metadata-euw1")
 
-# Threshold: above this, we use frame sampling
+# Thresholds
 MAX_VIDEO_BYTES = 20 * 1024 * 1024  # 20 MB
+MAX_FRAMES = 150  # Hard cap to prevent OOM
 
 
 # -------------------------------------------------------------------
@@ -158,91 +159,69 @@ def strip_leading_json_token(text: str) -> str:
 
 
 # -------------------------------------------------------------------
-# Schema (unchanged)
+# NEW SCHEMA BLOCK (REPLACED)
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """{
-  "description_long": string,
-  "entities": {
-    "people": [
-      {
-        "name": string|null,
-        "role": string|null,
-        "clothing": string[],
-        "age_range": string|null,
-        "facial_expression": string|null,
-        "pose": string|null
-      }
-    ],
-    "places": [
-      {
-        "name": string|null,
-        "sublocation": string|null,
-        "indoor_outdoor": "indoor"|"outdoor"|null
-      }
-    ],
-    "orgs": [
-      {
-        "name": string,
-        "evidence": string|null
-      }
-    ]
+  "brief_summary": "string",
+  "verbose_summary": "string",
+
+  "people": {
+    "present": "boolean",
+    "count": "number | null"
   },
-  "time": {
-    "year": number|null,
-    "month": number|null,
-    "day": number|null,
-    "confidence": number,
-    "hint_text": string|null
+
+  "brand_ip": {
+    "logos_detected": ["string"],
+    "other_branding": ["string"]
   },
-  "objects": [
-    { "label": string, "salience": number }
-  ],
-  "activities": [
-    { "label": string, "confidence": number, "who": string|null }
-  ],
-  "themes": [string],
-  "composition": {
-    "camera_angle": string|null,
-    "focal_length_est": string|null,
-    "depth_of_field": string|null,
-    "lighting": string|null,
-    "color_palette": string|null,
-    "contrast_style": string|null,
-    "orientation": string|null
+
+  "celebrities": {
+    "detected": ["string"]
   },
-  "text_in_image": [string],
-  "distinguishing_features": [string],
-  "story_use": ["opener"|"bridge"|"chapter_art"|"context"|"climax"|"reveal"],
-  "safety": {
-    "sensitive": boolean,
-    "notes": string|null
+
+  "movement": {
+    "type": "string | null"
   },
-  "time_analysis": {
-    "era": string|null,
-    "decade_estimate": string|null,
-    "season_estimate": string|null,
-    "time_of_day": string|null,
-    "lighting_context": string|null,
-    "metadata_date": string|null,
-    "visual_date_estimate": string|null,
-    "alignment": "match"|"partial_match"|"contradiction",
-    "notes": string|null
+
+  "text_overlays": {
+    "present": "boolean",
+    "texts": ["string"]
   },
+
+  "quick_edits": {
+    "present": "boolean",
+    "types": ["string"]
+  },
+
   "timeline": [
     {
-      "timestamp": string|null,
-      "description": string,
-      "entities_involved": [string],
-      "objects_involved": [string],
-      "actions": [string],
-      "scene_change": boolean
+      "timestamp": "string",
+      "description": "string"
     }
-  ]
+  ],
+
+  "audio_transcript": "string | null",
+
+  "demographics": [
+    {
+      "age_range": "string | null",
+      "gender": "string | null",
+      "notes": "string | null"
+    }
+  ],
+
+  "objects": ["string"],
+
+  "ai_generated": {
+    "visual_ai_signs": "boolean",
+    "audio_ai_signs": "boolean",
+    "notes": "string"
+  }
 }"""
 
 
 # -------------------------------------------------------------------
-# Prompt builder (unchanged)
+# NEW PROMPT BUILDER TEMPLATE (REPLACED)
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict, media_type: str) -> str:
     media_line = (
@@ -252,48 +231,29 @@ def build_prompt(asset_json: dict, media_type: str) -> str:
     )
 
     template = f"""
-You are a forensic visual analyst.
-
-{media_line}
-Your task is to extract ONLY information that is directly visible in the media.
-Metadata may be incomplete, noisy, or partially incorrect. Treat it as optional context, not fact.
+You are a constrained video-analysis system. Your output must be strictly factual, concise, and fully aligned with the schema provided. Do not speculate, infer intent, or add information not directly observable in the media.
 
 STRICT RULES:
-- Describe ONLY what is visually present.
-- Do NOT invent or assume anything that cannot be clearly confirmed.
-- Do NOT use metadata to add details that are not visible.
-- Do NOT repeat the same information across multiple fields.
-- Be specific, concrete, and observational.
-- If something is unclear or partially visible, state the uncertainty.
-- If a field has no visible evidence, return null or an empty list.
-- Avoid generic statements; focus on precise, observable attributes.
-- Output MUST be valid JSON following the schema exactly.
-- No markdown, no commentary, no extra keys.
+1. If you are uncertain, return null, false, or an empty array.
+2. Never guess identities, brands, demographics, or AI‑generation indicators.
+3. All summaries must describe only what is visually or audibly present.
+4. Do not include opinions, interpretations, or narrative embellishment.
+5. Keep all text short, direct, and free of adjectives unless they describe observable properties.
+6. Follow the schema exactly. Do not add or remove fields.
+7. Use consistent terminology across all fields.
+8. When detecting people, brands, celebrities, objects, or text, only report items that are clearly visible.
+9. For timeline events, include only concrete, observable actions at approximate timestamps.
+10. For transcripts, provide a concise, approximate representation of audible speech without adding meaning.
 
-TIME SENSITIVITY RULES:
-- Use Getty metadata (e.g., date_created, era, collection, caption) as contextual hints.
-- Cross-check metadata against visible evidence such as clothing, vehicles, architecture, technology, hairstyles, film grain, color grading, and lighting style.
-- If metadata suggests a specific year or decade, treat it as a hypothesis and verify visually.
-- If the visual evidence contradicts metadata, note the contradiction explicitly.
-- Estimate time of day, season, and era based on shadows, foliage, weather, clothing, and lighting.
-- If the media appears archival, identify the approximate decade based on film texture, aspect ratio, and color profile.
-- If the media appears modern, identify the approximate year range based on camera quality, resolution, and color science.
-- Always return a confidence score.
+DEFINITIONS:
+- “Brief Summary”: 1–2 sentences describing the core content.
+- “Verbose Summary”: 3–6 sentences describing the sequence and context.
+- “People Count”: number of distinct humans visible; return null if unclear.
+- “Movement Type”: steady, handheld, shaky, static, tracking, panning.
+- “Quick Edits”: jump cuts, fast transitions, rapid scene changes.
+- “AI‑Generated Detection”: only report if clear visual or audio artefacts strongly indicate synthetic origin.
 
-TEMPORAL ANALYSIS RULES (VIDEO ONLY):
-- Treat the video as a sequence of evolving moments, not a single frame.
-- Identify events in chronological order.
-- Describe what changes over time: people, objects, actions, lighting, weather, camera movement.
-- Note when new elements enter or leave the scene.
-- Identify cause-and-effect relationships between events.
-- Identify scene boundaries, transitions, and shifts in tone or activity.
-- Capture micro-events (gestures, reactions, movements) and macro-events (scene changes, major actions).
-- If the video contains multiple shots, describe each shot separately and in order.
-- If the video contains continuous action, describe the progression clearly.
-- Always anchor descriptions to the timeline: “At the beginning…”, “Midway…”, “Toward the end…”.
-- Do not invent events that are not visible.
-
-Your goal is to produce the most detailed, accurate, non‑fictional, non‑redundant analysis possible based solely on what the media shows.
+Return only valid JSON that conforms to the schema.
 
 Schema:
 {{schema}}
@@ -348,7 +308,7 @@ def run_gemini(prompt: str, media_bytes: bytes, media_type: str) -> dict:
 
     try:
         return json.loads(text)
-    except:
+    except Exception:
         raise HTTPException(500, f"Invalid JSON from model: {text}")
 
 
@@ -378,7 +338,7 @@ def run_gemini_multi(prompt: str, frames: list) -> dict:
 
     try:
         return json.loads(text)
-    except:
+    except Exception:
         raise HTTPException(500, f"Invalid JSON from model: {text}")
 
 
@@ -388,7 +348,10 @@ def run_gemini_multi(prompt: str, frames: list) -> dict:
 def write_metadata_to_gcs(asset_id: str, data: dict):
     try:
         blob = storage_client.bucket(METADATA_BUCKET).blob(f"{asset_id}.json")
-        blob.upload_from_string(json.dumps(data, indent=2), content_type="application/json")
+        blob.upload_from_string(
+            json.dumps(data, indent=2),
+            content_type="application/json",
+        )
     except Exception as e:
         raise HTTPException(500, f"Failed to write metadata to GCS: {e}")
 
@@ -408,6 +371,8 @@ async def enrich(req: Request):
     asset_json = await req.json()
 
     asset_id = asset_json.get("asset_id")
+    if not asset_id:
+        raise HTTPException(400, "asset_id is required")
 
     # Prefer explicit media_type, but fall back to asset_type
     media_type = asset_json.get("media_type")
@@ -424,12 +389,12 @@ async def enrich(req: Request):
     print("MEDIA_TYPE:", media_type)
     print("ASSET_TYPE:", asset_type)
 
-    if not asset_id:
-        raise HTTPException(400, "asset_id is required")
-
     # Load media
     if "media_bytes" in asset_json:
-        media_bytes = base64.b64decode(asset_json["media_bytes"])
+        try:
+            media_bytes = base64.b64decode(asset_json["media_bytes"])
+        except Exception:
+            raise HTTPException(400, "Invalid base64 media_bytes")
     elif "bucket" in asset_json and "file_name" in asset_json:
         media_bytes = load_from_gcs(asset_json["bucket"], asset_json["file_name"])
     else:
@@ -442,10 +407,18 @@ async def enrich(req: Request):
         original_size = len(media_bytes)
         print("ORIGINAL VIDEO SIZE:", original_size)
 
+        # If video is too large, sample frames at 5 FPS instead of sending full video
         if original_size > MAX_VIDEO_BYTES:
             print("VIDEO TOO LARGE → USING FRAME SAMPLING (5 FPS)")
             frames = extract_frames(media_bytes, fps=5)
-            print("EXTRACTED FRAMES:", len(frames))
+            print("EXTRACTED FRAMES (raw):", len(frames))
+
+            # Hard cap to prevent OOM
+            if len(frames) > MAX_FRAMES:
+                frames = frames[:MAX_FRAMES]
+                print(f"FRAMES TRIMMED TO CAP: {MAX_FRAMES}")
+            else:
+                print("FRAMES WITHIN CAP")
 
             prompt = build_prompt(asset_json, media_type)
             print("PROMPT SIZE:", len(prompt))
