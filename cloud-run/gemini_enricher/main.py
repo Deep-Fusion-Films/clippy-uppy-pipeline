@@ -158,7 +158,7 @@ def strip_leading_json_token(text: str) -> str:
 
 
 # -------------------------------------------------------------------
-# Schema (upgraded with explicit AI‑artifact fields)
+# Schema (upgraded with richer objects + multilingual text + transcripts)
 # -------------------------------------------------------------------
 SCHEMA_BLOCK = """{
   "brief_summary": "string",
@@ -197,7 +197,13 @@ SCHEMA_BLOCK = """{
       "cnt": "number | null",
       "sal": "number | null",
       "pos": "string | null",
-      "use": "string | null"
+      "use": "string | null",
+      "col": "string | null",
+      "txt": {
+        "orig": "string | null",
+        "lang": "string | null",
+        "eng": "string | null"
+      }
     }
   ],
 
@@ -231,7 +237,14 @@ SCHEMA_BLOCK = """{
     "wth": "string | null",
     "surf": "string | null",
     "bg": "string | null",
-    "depth": "string | null"
+    "depth": "string | null",
+    "txt": [
+      {
+        "orig": "string",
+        "lang": "string",
+        "eng": "string"
+      }
+    ]
   },
 
   "audio": {
@@ -239,14 +252,22 @@ SCHEMA_BLOCK = """{
     "lang": "string | null",
     "events": ["string"],
     "noise": ["string"],
-    "mood": "string | null"
+    "mood": "string | null",
+    "transcript_original": "string | null",
+    "transcript_cleaned": "string | null",
+    "transcript_english": "string | null"
   },
 
   "text_overlays": {
     "present": "boolean",
-    "texts": ["string"],
-    "pos": ["string"],
-    "lang": ["string"]
+    "texts": [
+      {
+        "orig": "string",
+        "lang": "string",
+        "eng": "string",
+        "pos": "string | null"
+      }
+    ]
   },
 
   "quick_edits": {
@@ -292,7 +313,7 @@ SCHEMA_BLOCK = """{
 
 
 # -------------------------------------------------------------------
-# Prompt builder (updated with new instructions)
+# Prompt builder (updated with object, language, transcript, AI rules)
 # -------------------------------------------------------------------
 def build_prompt(asset_json: dict, media_type: str) -> str:
     media_line = (
@@ -304,7 +325,7 @@ def build_prompt(asset_json: dict, media_type: str) -> str:
     template = f"""
 You are a constrained forensic video-analysis system. Your output must be strictly factual, concise, and fully aligned with the schema provided. Do not speculate, infer intent, or add information not directly observable in the media.
 
-{media_line} You may be shown multiple frames extracted at equally spaced intervals throughout the video. These frames reveal the action, movement, and changes that occur over time. Your task is to extract maximum factual detail to help users find this video when searching for specific content.
+{media_line} You may be shown multiple frames extracted at equally spaced intervals throughout the video. These frames reveal the action, movement, and changes that occur over time. Your task is to extract maximum factual detail to help users find this asset when searching for specific content.
 
 STRICT RULES:
 1. If uncertain, return null, false, or empty arrays.
@@ -319,6 +340,34 @@ STRICT RULES:
 10. Camera analysis must reflect observable motion, framing, shake, exposure, and focus behaviour.
 11. Environment analysis must reflect visible lighting, surfaces, depth, and location type.
 12. Human and animal behaviour must be strictly based on visible actions and interactions.
+
+OBJECT IDENTIFICATION RULES:
+- Identify every visible object, prop, vehicle, sign, decoration, tool, or item.
+- If an object appears in the brief or verbose summary, it must also appear in the objects[] list.
+- For each object, provide label, approximate count (if possible), position, usage, and color when visible.
+- If an object contains text (signs, banners, labels), extract:
+  - original text (orig)
+  - detected language code (lang)
+  - English translation (eng), if possible.
+
+TEXT & LANGUAGE RULES:
+- For any visible text in the environment (signs, storefronts, banners, posters), populate environment.txt with:
+  - orig: original text
+  - lang: language code
+  - eng: English translation
+- For any on-screen overlays or subtitles, populate text_overlays.texts with:
+  - orig: original text
+  - lang: language code
+  - eng: English translation
+  - pos: approximate position (top, bottom, center, left, right).
+
+TRANSCRIPTION RULES:
+- For non-English or noisy audio, populate:
+  - transcript_original: raw or approximate original-language content
+  - transcript_cleaned: cleaned version with repetition and noise removed
+  - transcript_english: concise English translation
+- Clean repeated phrases and remove filler or obvious noise tokens.
+- Keep transcripts concise and factual.
 
 AI-ARTIFACT DETECTION RULES:
 Check for the following visual indicators of AI generation:
@@ -338,7 +387,7 @@ Check for the following audio indicators of AI generation:
 - Unnatural prosody, pacing, or breath patterns
 - Abrupt cutoffs or unnatural transitions
 - Repetitive or looping background noise
-- Phasey, warbling, or “underwater” artifacts
+- Phasey, warbling, or underwater-like artifacts
 - Inconsistent room acoustics or mismatched reverb
 - Audio that does not match visible actions or timing
 
@@ -349,15 +398,15 @@ ADDITIONAL DETAIL REQUIREMENTS:
 - Identify changes in composition, lighting, subject position, and camera behaviour.
 - Identify recognizable people, places, or events only if visually confirmed.
 - If historical context is visually evident (clothing, technology, architecture), include it; otherwise return null.
-- Extract all relevant visual and audible cues that would help a user search for this video in a stock library.
+- Extract all relevant visual and audible cues that would help a user search for this asset in a stock library.
 
 DEFINITIONS:
-- “Brief Summary”: 1–2 sentences describing the core content.
-- “Verbose Summary”: A detailed description of the sequence, context, and progression.
-- “Movement Type”: steady, handheld, shaky, static, tracking, panning.
-- “Timeline ts”: approximate time markers like 00:00, 00:05, 00:10.
-- “Audio Events”: footsteps, traffic, wind, speech, animal noises.
-- “Scene Change”: a clear shift in camera angle, location, or composition.
+- "Brief Summary": 1–2 sentences describing the core content.
+- "Verbose Summary": A detailed description of the sequence, context, and progression.
+- "Movement Type": steady, handheld, shaky, static, tracking, panning.
+- "Timeline ts": approximate time markers like 00:00, 00:05, 00:10.
+- "Audio Events": footsteps, traffic, wind, speech, animal noises.
+- "Scene Change": a clear shift in camera angle, location, or composition.
 
 Return only valid JSON that conforms to the schema.
 
@@ -454,7 +503,10 @@ def run_gemini_multi(prompt: str, frames: list) -> dict:
 def write_metadata_to_gcs(asset_id: str, data: dict):
     try:
         blob = storage_client.bucket(METADATA_BUCKET).blob(f"{asset_id}.json")
-        blob.upload_from_string(json.dumps(data, indent=2), content_type="application/json")
+        blob.upload_from_string(
+            json.dumps(data, indent=2),
+            content_type="application/json",
+        )
     except Exception as e:
         raise HTTPException(500, f"Failed to write metadata to GCS: {e}")
 
@@ -474,6 +526,8 @@ async def enrich(req: Request):
     asset_json = await req.json()
 
     asset_id = asset_json.get("asset_id")
+    if not asset_id:
+        raise HTTPException(400, "asset_id is required")
 
     # Prefer explicit media_type, but fall back to asset_type
     media_type = asset_json.get("media_type")
@@ -490,12 +544,12 @@ async def enrich(req: Request):
     print("MEDIA_TYPE:", media_type)
     print("ASSET_TYPE:", asset_type)
 
-    if not asset_id:
-        raise HTTPException(400, "asset_id is required")
-
     # Load media
     if "media_bytes" in asset_json:
-        media_bytes = base64.b64decode(asset_json["media_bytes"])
+        try:
+            media_bytes = base64.b64decode(asset_json["media_bytes"])
+        except Exception:
+            raise HTTPException(400, "Invalid base64 media_bytes")
     elif "bucket" in asset_json and "file_name" in asset_json:
         media_bytes = load_from_gcs(asset_json["bucket"], asset_json["file_name"])
     else:
@@ -508,10 +562,11 @@ async def enrich(req: Request):
         original_size = len(media_bytes)
         print("ORIGINAL VIDEO SIZE:", original_size)
 
+        # If video is too large, sample frames at 5 FPS instead of sending full video
         if original_size > MAX_VIDEO_BYTES:
             print("VIDEO TOO LARGE → USING FRAME SAMPLING (5 FPS)")
             frames = extract_frames(media_bytes, fps=5)
-            print("EXTRACTED FRAMES:", len(frames))
+            print("EXTRACTED FRAMES (raw):", len(frames))
 
             prompt = build_prompt(asset_json, media_type)
             print("PROMPT SIZE:", len(prompt))
